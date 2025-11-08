@@ -7,6 +7,10 @@
 
 A Python script for macOS that maintains dynamic public ports for ProtonVPN connections using NAT-PMP. It periodically refreshes the port mapping and can optionally control macOS applications (e.g., torrent clients) by updating their configurations and restarting them when the port changes.
 
+## Author
+
+Kent <kent@bci.com>
+
 ## Keywords
 macos, protonvpn, nat-pmp
 
@@ -32,8 +36,8 @@ macos, protonvpn, nat-pmp
 
 1. Clone the repository:
    ```bash
-   git clone https://github.com/yourusername/protonvpn-public-port-refresh-macos.git
-   cd protonvpn-public-port-refresh-macos
+   git clone https://github.com/bci/protonvpn_public_port_refresh_macos.git
+   cd protonvpn_public_port_refresh_macos
    ```
 
 2. Ensure the NAT-PMP client is installed and accessible.
