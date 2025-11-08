@@ -9,7 +9,7 @@ A Python script for macOS that maintains dynamic public ports for ProtonVPN conn
 
 ## Author
 
-Kent <kent@bci.com>
+Kent <kent@bci.com> with assistance from GitHub Copilot and Grok Code Fast 1
 
 ## Keywords
 macos, protonvpn, nat-pmp
