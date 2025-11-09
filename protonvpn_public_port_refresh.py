@@ -14,6 +14,9 @@ applications. It continues to refresh the port at the specified interval and han
 changes by restarting applications if needed. The script can be stopped gracefully at any
 time using Ctrl+C.
 
+NOTE: This script requires ProtonVPN with P2P access enabled and WireGuard protocol.
+Connect to a P2P-enabled server for NAT-PMP support.
+
 USAGE:
     python3 protonvpn-public-port-refresh.py [options]
 
@@ -60,7 +63,7 @@ EXAMPLES:
 REQUIREMENTS:
     - natpmp-client.py installed at ~/Library/Python/3.9/bin/
     - Configured applications must be properly installed
-    - ProtonVPN connection with NAT-PMP support
+    - ProtonVPN connection with NAT-PMP support (P2P plan, WireGuard protocol, P2P server)
 
 NOTES:
     - The script uses SIGINT (Ctrl+C) for graceful shutdown
@@ -134,6 +137,7 @@ class PortRefresher:
         self.port_changed_count = 0
         self.last_change_time = None
         self.pmt_timeout = pmt_timeout
+        self.interface = None
 
         # Setup logging
         loglevel_map = {
@@ -250,9 +254,9 @@ class PortRefresher:
                 lines = route_result['output'].split('\n')
                 for line in lines:
                     parts = line.split()
-                    if len(parts) >= 6 and parts[0] == self.vpn_gateway and parts[5].startswith('utun'):
+                    if len(parts) >= 4 and parts[0] == self.vpn_gateway and parts[-1].startswith('utun'):
                         status['connected'] = True
-                        status['interface'] = parts[5]
+                        status['interface'] = parts[-1]
                         break
             
             # Test NAT-PMP support
@@ -284,13 +288,7 @@ class PortRefresher:
         
         try:
             # Use subprocess for safe command execution
-            proc = subprocess.run(
-                command, 
-                shell=True, 
-                capture_output=True, 
-                text=True, 
-                timeout=30
-            )
+            proc = subprocess.run(command, shell=True, capture_output=True, text=True, timeout=30)
             result['success'] = proc.returncode == 0
             result['output'] = proc.stdout
             result['error'] = proc.stderr
@@ -327,6 +325,62 @@ class PortRefresher:
         
         return info
 
+    def get_packet_counts(self):
+        """
+        Get packet counts for the VPN interface from netstat -i.
+        
+        Returns:
+            tuple: (input_packets, output_packets) or (None, None) if not found
+        """
+        if not self.interface:
+            return None, None
+        
+        result = self.run_diagnostic_command("netstat -i")
+        logging.debug(f"netstat -i success: {result['success']}, output length: {len(result['output'])}, error: {result['error']}")
+        if not result['success']:
+            return None, None
+        
+        lines = result['output'].split('\n')
+        logging.debug(f"netstat -i lines count: {len(lines)}")
+        for line in lines:
+            logging.debug(f"netstat -i line: {repr(line)}")
+            parts = line.split()
+            if parts and parts[0] == self.interface and not parts[2].startswith('<Link'):
+                logging.debug(f"Found interface line: {parts}")
+                try:
+                    ipkts = int(parts[4])  # Ipkts
+                    opkts = int(parts[6])  # Opkts
+                    logging.debug(f"Parsed ipkts: {ipkts}, opkts: {opkts}")
+                    return ipkts, opkts
+                except (IndexError, ValueError) as e:
+                    logging.debug(f"Parse error: {e}")
+                    pass
+        logging.debug(f"Interface {self.interface} not found in netstat -i")
+        return None, None
+
+    def format_count(self, n):
+        """
+        Format a number into human-readable form (k, m, g, t).
+        
+        Args:
+            n (int or None): Number to format
+            
+        Returns:
+            str: Formatted string
+        """
+        if n is None:
+            return "N/A"
+        if n >= 1e12:
+            return f"{n/1e12:.1f}t"
+        elif n >= 1e9:
+            return f"{n/1e9:.1f}g"
+        elif n >= 1e6:
+            return f"{n/1e6:.1f}m"
+        elif n >= 1e3:
+            return f"{n/1e3:.1f}k"
+        else:
+            return str(n)
+
     def run(self):
         """
         Main execution loop.
@@ -340,6 +394,15 @@ class PortRefresher:
             logging.info(f"Controlling apps: {', '.join(self.app_control)}")
         else:
             logging.info("No apps to control")
+
+        # Check VPN connection and set interface
+        status = self.check_vpn_connection()
+        if status['connected']:
+            self.interface = status['interface']
+            logging.info(f"VPN interface detected: {self.interface}")
+        else:
+            logging.warning("VPN not connected. Packet counts will not be available until connected.")
+            self.interface = None
 
         # Acquire initial port
         logging.info("Requesting initial public port...")
@@ -393,8 +456,18 @@ class PortRefresher:
                     time.sleep(30)  # Wait for stop
                     self.start_apps()
 
-            logging.info(f"Public port: {self.current_port}, changed {self.port_changed_count} time(s), last at {self.last_change_time}")
-            logging.info(f"Next refresh in {self.refresh_seconds} seconds. Press Ctrl+C to stop.")
+            # Get packet counts
+            if not self.interface:
+                # Try to detect interface if not set
+                status = self.check_vpn_connection()
+                if status['connected']:
+                    self.interface = status['interface']
+                    logging.info(f"VPN interface detected: {self.interface}")
+            ipkts, opkts = self.get_packet_counts()
+            formatted_in = self.format_count(ipkts)
+            formatted_out = self.format_count(opkts)
+            logging.info(f"Public port: {self.current_port} (in: {formatted_in}, out: {formatted_out}), changed {self.port_changed_count} time(s), last at {self.last_change_time}")
+            logging.info(f"Next refresh in {self.refresh_seconds} seconds (gateway: {self.vpn_gateway}). Press Ctrl+C to stop.")
 
         logging.info("Stopping refresher")
         if self.app_control:
