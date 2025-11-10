@@ -4,6 +4,7 @@
 [![macOS](https://img.shields.io/badge/platform-macOS-lightgrey.svg)](https://www.apple.com/macos/)
 [![Coverage](https://img.shields.io/badge/coverage-68%25-green.svg)](htmlcov/index.html)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Version](https://img.shields.io/badge/version-1.0.0-blue.svg)]()
 
 A Python script for macOS that maintains dynamic public ports for ProtonVPN connections using NAT-PMP. It periodically refreshes the port mapping and can optionally control macOS applications (e.g., torrent clients) by updating their configurations and restarting them when the port changes.
 
@@ -14,7 +15,7 @@ A Python script for macOS that maintains dynamic public ports for ProtonVPN conn
 Kent <kent@bci.com> with assistance from GitHub Copilot and Grok Code Fast 1
 
 ## Keywords
-macos, protonvpn, nat-pmp
+macos, protonvpn, nat-pmp, folx
 
 ## Features
 
@@ -73,16 +74,16 @@ python3 protonvpn_public_port_refresh.py
 
 ### Command-Line Options
 
+- `--app-control APPS`: Comma-separated list of apps to control (default: none)
+- `--app-list`: Display all configured apps and exit
+- `--diagnostics`: Run network diagnostics
+- `--help`: Show help message
+- `--loglevel LEVEL`: Log level: debug, info, warning, error (default: info)
+- `--network-info`: Display network information
+- `--pmt-timeout PMT_TIMEOUT`: Timeout for NAT-PMP operations in seconds (default: 30)
 - `--refresh-seconds SECONDS`: Interval to refresh port (default: 45)
 - `--vpn-gateway GATEWAY`: VPN gateway IP (default: 10.2.0.1)
-- `--app-control APPS`: Comma-separated list of apps to control (default: none)
-- `--loglevel LEVEL`: Log level: debug, info, warning, error (default: info)
-- `--pmt-timeout PMT_TIMEOUT`: Timeout for NAT-PMP operations in seconds (default: 30)
-- `--app-list`: Display all configured apps and exit
 - `--vpn-status`: Check and display VPN connection status
-- `--diagnostics`: Run network diagnostics
-- `--network-info`: Display network information
-- `--help`: Show help message
 
 ### Examples
 
@@ -113,11 +114,25 @@ python3 protonvpn_public_port_refresh.py --loglevel debug --app-control Folx3-se
 
 ## Supported Applications
 
-Currently supported apps (defined in `APPS_CONFIG`):
+The script can control macOS applications that support port configuration. Currently supported apps (defined in `APPS_CONFIG`):
 
-- **Folx3-setapp**: Torrent client from Setapp.
+### Folx v3 (Setapp) - `Folx3-setapp`
 
-To add more apps, edit the `APPS_CONFIG` dictionary in the script.
+**Description**: Folx is a download manager and torrent client available via Setapp subscription.
+
+**Configuration**:
+- **App Bundle Path**: `/Applications/Setapp/Folx.app`
+- **macOS Defaults Domain**: `com.eltima.Folx3-setapp`
+- **Port Setting**: The script updates the `TorrentTCPPort` setting in `GeneralUserSettings` via `defaults write`
+- **Start Command**: Uses `open` to launch the application
+- **Stop Command**: Uses AppleScript to quit the app (`quit app "Folx"`)
+
+**Requirements**:
+- Folx v3 must be installed via Setapp
+- The app must be configured to use the dynamic port for torrent downloads
+- Ensure Folx is set to listen on the configured port in its preferences
+
+To add more apps, edit the `APPS_CONFIG` dictionary in the script with the appropriate paths, defaults domains, and control functions.
 
 ## Testing
 

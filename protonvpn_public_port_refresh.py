@@ -3,6 +3,8 @@
 protonvpn-public-port-refresh.py
 Refreshes ProtonVPN public port periodically and controls specified applications.
 
+VERSION: 1.0.0
+
 DESCRIPTION:
 This script maintains the dynamic public port for ProtonVPN connections by periodically
 refreshing the NAT-PMP mapping. It can optionally control macOS applications that depend
