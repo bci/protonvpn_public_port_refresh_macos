@@ -3,7 +3,7 @@
 protonvpn-public-port-refresh.py
 Refreshes ProtonVPN public port periodically and controls specified applications.
 
-VERSION: 1.0.0
+VERSION: 1.1.0
 
 DESCRIPTION:
 This script maintains the dynamic public port for ProtonVPN connections by periodically
@@ -73,6 +73,8 @@ NOTES:
     - Port changes trigger application restart with 30-second wait
     - All static configuration is in the APPS_CONFIG dictionary
 """
+
+__version__ = "1.1.0"
 
 import argparse
 import curses

@@ -204,6 +204,21 @@ class TestPortRefresher(unittest.TestCase):
         self.assertIn('interfaces', info)
         self.assertTrue(info['dns_working'])
 
+    def test_format_time(self):
+        """Test time formatting as HH:MM:SS."""
+        refresher = PortRefresher(**self.test_args)
+
+        # Test various time values
+        self.assertEqual(refresher.format_time(0), "00:00:00")
+        self.assertEqual(refresher.format_time(1), "00:00:01")
+        self.assertEqual(refresher.format_time(59), "00:00:59")
+        self.assertEqual(refresher.format_time(60), "00:01:00")
+        self.assertEqual(refresher.format_time(61), "00:01:01")
+        self.assertEqual(refresher.format_time(3599), "00:59:59")
+        self.assertEqual(refresher.format_time(3600), "01:00:00")
+        self.assertEqual(refresher.format_time(3661), "01:01:01")
+        self.assertEqual(refresher.format_time(7265), "02:01:05")  # 2*3600 + 1*60 + 5
+
 
 class TestAppFunctions(unittest.TestCase):
     """Test cases for application control functions."""
@@ -331,6 +346,40 @@ class TestArgumentParsing(unittest.TestCase):
 
         mock_print.assert_any_call("Network Information:")
         mock_print.assert_any_call("DNS Resolution: ✓")
+
+    @patch('protonvpn_public_port_refresh.curses')
+    @patch('protonvpn_public_port_refresh.PortRefresher')
+    @patch('sys.argv', ['test', '--status'])
+    def test_status_option(self, mock_refresher, mock_curses):
+        """Test --status option."""
+        from protonvpn_public_port_refresh import main
+        main()
+
+        # Check that PortRefresher was created
+        mock_refresher.assert_called_once_with(45, '10.2.0.1', '', 'info', 30)
+        # Check that curses.wrapper was called with status screen
+        mock_curses.wrapper.assert_called_once()
+        # The wrapper should be called with function, timeout, and args
+        args, kwargs = mock_curses.wrapper.call_args
+        self.assertEqual(len(args), 3)  # function, timeout, args
+        self.assertIsNone(args[1])  # timeout should be None
+
+    @patch('protonvpn_public_port_refresh.curses')
+    @patch('protonvpn_public_port_refresh.PortRefresher')
+    @patch('sys.argv', ['test', '--status', '--status-timeout', '30'])
+    def test_status_with_timeout_option(self, mock_refresher, mock_curses):
+        """Test --status with --status-timeout option."""
+        from protonvpn_public_port_refresh import main
+        main()
+
+        # Check that PortRefresher was created
+        mock_refresher.assert_called_once_with(45, '10.2.0.1', '', 'info', 30)
+        # Check that curses.wrapper was called with status screen
+        mock_curses.wrapper.assert_called_once()
+        # The wrapper should be called with function, timeout, and args
+        args, kwargs = mock_curses.wrapper.call_args
+        self.assertEqual(len(args), 3)  # function, timeout, args
+        self.assertEqual(args[1], 30)  # timeout should be 30
 
 
 if __name__ == '__main__':

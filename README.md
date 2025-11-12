@@ -4,7 +4,7 @@
 [![macOS](https://img.shields.io/badge/platform-macOS-lightgrey.svg)](https://www.apple.com/macos/)
 [![Coverage](https://img.shields.io/badge/coverage-68%25-green.svg)](htmlcov/index.html)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Version](https://img.shields.io/badge/version-1.0.0-blue.svg)]()
+[![Version](https://img.shields.io/badge/version-1.1.0-blue.svg)]()
 
 A Python script for macOS that maintains dynamic public ports for ProtonVPN connections using NAT-PMP. It periodically refreshes the port mapping and can optionally control macOS applications (e.g., torrent clients) by updating their configurations and restarting them when the port changes.
 
