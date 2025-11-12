@@ -107,12 +107,84 @@ def stop_folx():
     """Stop the Folx application."""
     subprocess.run(["osascript", "-e", 'quit app "Folx"'], check=True)
 
+def get_folx_status(refresher):
+    """
+    Get Folx application status information.
+    
+    Args:
+        refresher: PortRefresher instance
+        
+    Returns:
+        dict: Status information for display
+    """
+    status = {
+        'running': False,
+        'port': 0,
+        'connections': 0,
+        'cpu': 0.0,
+        'memory': 0.0
+    }
+    
+    # Check if Folx is running
+    result = refresher.run_diagnostic_command("pgrep -f 'Folx'")
+    status['running'] = result['success']
+    
+    if status['running']:
+        # Get port configuration
+        try:
+            result = subprocess.run([
+                "defaults", "export", "com.eltima.Folx3-setapp", "-"
+            ], capture_output=True, text=False)
+            if result.returncode == 0:
+                import plistlib
+                data = plistlib.loads(result.stdout)
+                # Port is nested in GeneralUserSettings
+                general_settings = data.get('GeneralUserSettings', {})
+                status['port'] = general_settings.get('TorrentTCPPort', 0)
+            else:
+                logging.debug(f"defaults export failed with returncode {result.returncode}: {result.stderr}")
+        except Exception as e:
+            logging.debug(f"Error reading Folx port: {e}")
+            # Try alternative method
+            try:
+                result = subprocess.run([
+                    "defaults", "read", "com.eltima.Folx3-setapp", 
+                    "TorrentTCPPort"
+                ], capture_output=True, text=True)
+                if result.returncode == 0:
+                    status['port'] = int(result.stdout.strip())
+            except:
+                pass
+        
+        # Get connection count
+        if hasattr(refresher, 'current_port') and refresher.current_port:
+            result = refresher.run_diagnostic_command(f"lsof -i :{refresher.current_port} | wc -l")
+            if result['success']:
+                try:
+                    status['connections'] = int(result['output'].strip()) - 1  # Subtract header line
+                except:
+                    pass
+        
+        # Get process stats
+        result = refresher.run_diagnostic_command("ps aux | grep -E 'Folx[^A]' | head -1")
+        if result['success'] and result['output'].strip():
+            parts = result['output'].split()
+            if len(parts) >= 4:
+                try:
+                    status['cpu'] = float(parts[2])
+                    status['memory'] = float(parts[3]) * 1024 / 100  # Convert % to MB approximation
+                except:
+                    pass
+    
+    return status
+
 APPS_CONFIG = {
     "Folx3-setapp": {
         "path": "/Applications/Setapp/Folx.app",
         "defaults": "com.eltima.Folx3-setapp",
         "start": start_folx,
         "stop": stop_folx,
+        "status": get_folx_status,
     },
     # Add more apps here if needed
 }
@@ -143,6 +215,11 @@ class PortRefresher:
         self.last_change_time = None
         self.pmt_timeout = pmt_timeout
         self.interface = None
+        
+        # Byte count tracking for BPS calculation
+        self.prev_ibytes = None
+        self.prev_obytes = None
+        self.prev_bytes_time = None
 
         # Setup logging
         loglevel_map = {
@@ -386,6 +463,69 @@ class PortRefresher:
         else:
             return str(n)
 
+    def format_bps(self, bps):
+        """
+        Format bits per second into human-readable form (Kbps, Mbps, Gbps).
+        
+        Args:
+            bps (float or None): Bits per second to format
+            
+        Returns:
+            str: Formatted string
+        """
+        if bps is None:
+            return "N/A"
+        if bps >= 1e9:
+            return f"{bps/1e9:.1f}Gbps"
+        elif bps >= 1e6:
+            return f"{bps/1e6:.1f}Mbps"
+        elif bps >= 1e3:
+            return f"{bps/1e3:.1f}Kbps"
+        else:
+            return f"{bps:.0f}bps"
+
+    def calculate_bps_rates(self, current_ibytes, current_obytes):
+        """
+        Calculate bits per second rates based on byte count changes.
+        
+        Args:
+            current_ibytes (int): Current input bytes
+            current_obytes (int): Current output bytes
+            
+        Returns:
+            tuple: (input_bps, output_bps) or (None, None) if insufficient data
+        """
+        current_time = time.time()
+        
+        if (self.prev_ibytes is None or self.prev_obytes is None or 
+            self.prev_bytes_time is None or current_ibytes is None or 
+            current_obytes is None):
+            # First measurement or missing data
+            self.prev_ibytes = current_ibytes
+            self.prev_obytes = current_obytes
+            self.prev_bytes_time = current_time
+            return None, None
+        
+        # Calculate time difference
+        time_diff = current_time - self.prev_bytes_time
+        if time_diff <= 0:
+            return None, None
+        
+        # Calculate byte differences
+        ibytes_diff = current_ibytes - self.prev_ibytes
+        obytes_diff = current_obytes - self.prev_obytes
+        
+        # Convert to bits per second
+        ibps = (ibytes_diff * 8) / time_diff if ibytes_diff >= 0 else 0
+        obps = (obytes_diff * 8) / time_diff if obytes_diff >= 0 else 0
+        
+        # Update previous values
+        self.prev_ibytes = current_ibytes
+        self.prev_obytes = current_obytes
+        self.prev_bytes_time = current_time
+        
+        return ibps, obps
+
     def format_time(self, seconds):
         """
         Format seconds into HH:MM:SS duration format.
@@ -462,14 +602,16 @@ class PortRefresher:
             status_height = min(5, height - 1)
             vpn_width = max(1, width // 2)
             ports_width = max(1, width - vpn_width)
-            # Make VPN and ports windows the same height
-            vpn_ports_height = min(10, (height - title_height - status_height - 1) // 2)
-            logs_height = max(1, height - title_height - vpn_ports_height - status_height)
+            # Adjust layout for Folx status: VPN left, Port History + Folx Status right
+            vpn_ports_height = min(8, (height - title_height - status_height - 1) // 3)
+            folx_height = min(6, (height - title_height - vpn_ports_height - status_height))
+            logs_height = max(1, height - title_height - vpn_ports_height - folx_height - status_height)
             
             title_win = curses.newwin(title_height, width, 0, 0)
             vpn_win = curses.newwin(vpn_ports_height, vpn_width, title_height, 0)
             ports_win = curses.newwin(vpn_ports_height, ports_width, title_height, vpn_width)
-            logs_win = curses.newwin(logs_height, width, title_height + vpn_ports_height, 0)
+            folx_win = curses.newwin(folx_height, ports_width, title_height + vpn_ports_height, vpn_width)
+            logs_win = curses.newwin(logs_height, width, title_height + vpn_ports_height + folx_height, 0)
             status_win = curses.newwin(status_height, width, height - status_height, 0)
             
             # Initialize data
@@ -497,6 +639,7 @@ class PortRefresher:
                         title_win.clear()
                         vpn_win.clear()
                         ports_win.clear()
+                        folx_win.clear()
                         logs_win.clear()
                         status_win.clear()
                         stdscr.refresh()
@@ -530,14 +673,16 @@ class PortRefresher:
                         status_height = min(5, height - 1)
                         vpn_width = max(1, width // 2)
                         ports_width = max(1, width - vpn_width)
-                        vpn_ports_height = min(10, (height - title_height - status_height - 1) // 2)
-                        logs_height = max(1, height - title_height - vpn_ports_height - status_height)
+                        vpn_ports_height = min(8, (height - title_height - status_height - 1) // 3)
+                        folx_height = min(6, (height - title_height - vpn_ports_height - status_height))
+                        logs_height = max(1, height - title_height - vpn_ports_height - folx_height - status_height)
                         
                         # Recreate windows with new dimensions
                         title_win = curses.newwin(title_height, width, 0, 0)
                         vpn_win = curses.newwin(vpn_ports_height, vpn_width, title_height, 0)
                         ports_win = curses.newwin(vpn_ports_height, ports_width, title_height, vpn_width)
-                        logs_win = curses.newwin(logs_height, width, title_height + vpn_ports_height, 0)
+                        folx_win = curses.newwin(folx_height, ports_width, title_height + vpn_ports_height, vpn_width)
+                        logs_win = curses.newwin(logs_height, width, title_height + vpn_ports_height + folx_height, 0)
                         status_win = curses.newwin(status_height, width, height - status_height, 0)
                         
                         # Clear screen and continue
@@ -589,6 +734,7 @@ class PortRefresher:
                     title_win.clear()
                     vpn_win.clear()
                     ports_win.clear()
+                    folx_win.clear()
                     logs_win.clear()
                     status_win.clear()
                     
@@ -665,6 +811,62 @@ class PortRefresher:
                     except curses.error:
                         pass
                     
+                    # Folx Status - safe writing
+                    try:
+                        folx_win.box()
+                        folx_win.addstr(0, 2, " App Status ", curses.A_BOLD)
+                        
+                        folx_height_win, folx_width = folx_win.getmaxyx()
+                        max_folx_text_width = folx_width - 3  # Leave margin for borders
+                        
+                        # Display status for controlled apps
+                        line_num = 1
+                        for app_name in self.app_control:
+                            if app_name in APPS_CONFIG and 'status' in APPS_CONFIG[app_name]:
+                                try:
+                                    app_status = APPS_CONFIG[app_name]['status'](self)
+                                    
+                                    # App name header
+                                    if line_num <= folx_height_win - 2:
+                                        folx_win.addstr(line_num, 1, f"{app_name}:", curses.A_BOLD)
+                                        line_num += 1
+                                    
+                                    # Status info
+                                    if line_num <= folx_height_win - 2:
+                                        status_text = "Running" if app_status.get('running', False) else "Not Running"
+                                        folx_win.addstr(line_num, 1, f"  Status: {status_text}", 
+                                                       curses.color_pair(1 if app_status.get('running', False) else 2))
+                                        line_num += 1
+                                    
+                                    if app_status.get('running', False):
+                                        # Port info
+                                        if 'port' in app_status and line_num <= folx_height_win - 2:
+                                            port_match = app_status['port'] == self.current_port if hasattr(self, 'current_port') and self.current_port else False
+                                            folx_win.addstr(line_num, 1, f"  Port: {app_status['port']}", 
+                                                           curses.color_pair(1 if port_match else 2))
+                                            line_num += 1
+                                        
+                                        # Connections
+                                        if 'connections' in app_status and line_num <= folx_height_win - 2:
+                                            folx_win.addstr(line_num, 1, f"  Connections: {app_status['connections']}")
+                                            line_num += 1
+                                        
+                                        # Performance
+                                        if 'cpu' in app_status and 'memory' in app_status and line_num <= folx_height_win - 2:
+                                            folx_win.addstr(line_num, 1, f"  CPU: {app_status['cpu']:.1f}% | Mem: {app_status['memory']:.1f}MB")
+                                            line_num += 1
+                                    
+                                    # Add spacing between apps
+                                    if line_num <= folx_height_win - 2:
+                                        line_num += 1
+                                        
+                                except Exception as e:
+                                    if line_num <= folx_height_win - 2:
+                                        folx_win.addstr(line_num, 1, f"  Error: {str(e)[:20]}", curses.color_pair(2))
+                                        line_num += 1
+                    except curses.error:
+                        pass
+                    
                     # Logs - safe writing
                     try:
                         logs_win.box()
@@ -674,7 +876,7 @@ class PortRefresher:
                         log_height, log_width = logs_win.getmaxyx()
                         max_msg_width = log_width - 3  # Leave margin for borders and safety
                         
-                        for i, msg in enumerate(reversed(log_messages)):
+                        for i, msg in enumerate(log_messages):
                             if i < log_height - 2:
                                 # Truncate message if too long
                                 if len(msg) > max_msg_width:
@@ -726,7 +928,16 @@ class PortRefresher:
                         # Show current packet counts if available
                         ipkts, opkts = self.get_packet_counts()
                         if ipkts is not None and opkts is not None:
-                            bytes_line = f"Bytes In: {self.format_count(ipkts)} | Out: {self.format_count(opkts)}"
+                            # Calculate BPS rates
+                            ibps, obps = self.calculate_bps_rates(ipkts, opkts)
+                            
+                            # Format the display
+                            bytes_in = self.format_count(ipkts)
+                            bytes_out = self.format_count(opkts)
+                            bps_in = f" ({self.format_bps(ibps)})" if ibps is not None else ""
+                            bps_out = f" ({self.format_bps(obps)})" if obps is not None else ""
+                            
+                            bytes_line = f"Bytes In: {bytes_in}{bps_in} | Out: {bytes_out}{bps_out}"
                             # Truncate bytes line if too long
                             if len(bytes_line) > status_width:
                                 bytes_line = bytes_line[:status_width - 3] + "..."
@@ -744,6 +955,7 @@ class PortRefresher:
                     title_win.refresh()
                     vpn_win.refresh()
                     ports_win.refresh()
+                    folx_win.refresh()
                     logs_win.refresh()
                     status_win.refresh()
                     

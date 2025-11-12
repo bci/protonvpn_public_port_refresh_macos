@@ -4,7 +4,7 @@ Unit tests for protonvpn-public-port-refresh.py
 """
 
 import unittest
-from unittest.mock import patch, MagicMock, call
+from unittest.mock import patch, MagicMock, call, Mock
 import sys
 import os
 import argparse
@@ -13,7 +13,7 @@ import argparse
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 # Import the classes and functions we want to test
-from protonvpn_public_port_refresh import PortRefresher, APPS_CONFIG, NAT_PMP_PATH, start_folx, stop_folx
+from protonvpn_public_port_refresh import PortRefresher, APPS_CONFIG, NAT_PMP_PATH, start_folx, stop_folx, get_folx_status
 
 
 class TestPortRefresher(unittest.TestCase):
@@ -204,20 +204,46 @@ class TestPortRefresher(unittest.TestCase):
         self.assertIn('interfaces', info)
         self.assertTrue(info['dns_working'])
 
-    def test_format_time(self):
-        """Test time formatting as HH:MM:SS."""
+    def test_format_bps(self):
+        """Test BPS formatting."""
         refresher = PortRefresher(**self.test_args)
 
-        # Test various time values
-        self.assertEqual(refresher.format_time(0), "00:00:00")
-        self.assertEqual(refresher.format_time(1), "00:00:01")
-        self.assertEqual(refresher.format_time(59), "00:00:59")
-        self.assertEqual(refresher.format_time(60), "00:01:00")
-        self.assertEqual(refresher.format_time(61), "00:01:01")
-        self.assertEqual(refresher.format_time(3599), "00:59:59")
-        self.assertEqual(refresher.format_time(3600), "01:00:00")
-        self.assertEqual(refresher.format_time(3661), "01:01:01")
-        self.assertEqual(refresher.format_time(7265), "02:01:05")  # 2*3600 + 1*60 + 5
+        # Test various BPS values
+        self.assertEqual(refresher.format_bps(None), "N/A")
+        self.assertEqual(refresher.format_bps(0), "0bps")
+        self.assertEqual(refresher.format_bps(500), "500bps")
+        self.assertEqual(refresher.format_bps(1500), "1.5Kbps")
+        self.assertEqual(refresher.format_bps(2500000), "2.5Mbps")
+        self.assertEqual(refresher.format_bps(1500000000), "1.5Gbps")
+
+    def test_calculate_bps_rates(self):
+        """Test BPS rate calculation."""
+        import time
+        refresher = PortRefresher(**self.test_args)
+
+        # Mock time from the beginning
+        original_time = time.time
+        call_count = 0
+        def mock_time():
+            nonlocal call_count
+            call_count += 1
+            return 1000.0 + (call_count - 1)  # First call: 1000, second call: 1001
+        
+        time.time = mock_time
+
+        try:
+            # First call should return None (baseline)
+            ibps, obps = refresher.calculate_bps_rates(1000, 2000)
+            self.assertIsNone(ibps)
+            self.assertIsNone(obps)
+
+            # Second call with 1 second time difference
+            ibps, obps = refresher.calculate_bps_rates(2000, 4000)
+            # 1000 bytes * 8 bits/byte / 1 second = 8000 bps
+            self.assertAlmostEqual(ibps, 8000, places=0)
+            self.assertAlmostEqual(obps, 16000, places=0)
+        finally:
+            time.time = original_time
 
 
 class TestAppFunctions(unittest.TestCase):
@@ -238,6 +264,64 @@ class TestAppFunctions(unittest.TestCase):
         mock_subprocess.assert_called_with([
             "osascript", "-e", 'quit app "Folx"'
         ], check=True)
+
+    @patch('protonvpn_public_port_refresh.subprocess.run')
+    def test_get_folx_status(self, mock_subprocess):
+        """Test getting Folx status."""
+        # Mock the defaults export command to return plist data
+        mock_plist_data = b'''<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>GeneralUserSettings</key>
+    <dict>
+        <key>TorrentTCPPort</key>
+        <integer>51413</integer>
+    </dict>
+</dict>
+</plist>'''
+        
+        # Mock all subprocess calls
+        def mock_run(*args, **kwargs):
+            cmd = args[0] if args else kwargs.get('args', [])
+            if 'defaults' in cmd and 'export' in cmd:
+                mock_result = MagicMock()
+                mock_result.returncode = 0
+                mock_result.stdout = mock_plist_data
+                return mock_result
+            elif 'pgrep' in cmd:
+                mock_result = MagicMock()
+                mock_result.returncode = 0
+                mock_result.stdout = b"Folx\n"
+                return mock_result
+            elif 'lsof' in cmd:
+                mock_result = MagicMock()
+                mock_result.returncode = 0
+                mock_result.stdout = b"3\n"
+                return mock_result
+            elif 'ps' in cmd:
+                mock_result = MagicMock()
+                mock_result.returncode = 0
+                mock_result.stdout = b"user 1234 1.2 3.4 Folx\n"
+                return mock_result
+            else:
+                mock_result = MagicMock()
+                mock_result.returncode = 1
+                mock_result.stdout = b""
+                return mock_result
+        
+        mock_subprocess.side_effect = mock_run
+        
+        refresher = PortRefresher(45, '10.2.0.1', [], 'info', 30)
+        refresher.current_port = 51413
+        
+        status = get_folx_status(refresher)
+        
+        self.assertTrue(status['running'])
+        self.assertEqual(status['port'], 51413)
+        self.assertEqual(status['connections'], 2)  # 3 - 1
+        self.assertEqual(status['cpu'], 1.2)
+        self.assertAlmostEqual(status['memory'], 34.816, places=2)  # 3.4 * 1024 / 100
 
 
 class TestConfiguration(unittest.TestCase):
