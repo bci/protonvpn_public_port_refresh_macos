@@ -332,7 +332,7 @@ class TestConfiguration(unittest.TestCase):
         self.assertIn("Folx3-setapp", APPS_CONFIG)
 
         folx_config = APPS_CONFIG["Folx3-setapp"]
-        required_keys = ["path", "defaults", "start", "stop"]
+        required_keys = ["path", "defaults", "start", "stop", "status", "gateway_required"]
 
         for key in required_keys:
             self.assertIn(key, folx_config)
@@ -341,6 +341,52 @@ class TestConfiguration(unittest.TestCase):
         self.assertEqual(folx_config["defaults"], "com.eltima.Folx3-setapp")
         self.assertTrue(callable(folx_config["start"]))
         self.assertTrue(callable(folx_config["stop"]))
+        self.assertTrue(callable(folx_config["status"]))
+        self.assertIsInstance(folx_config["gateway_required"], bool)
+
+    @patch('protonvpn_public_port_refresh.subprocess.run')
+    def test_check_gateway_required_apps_stop_when_vpn_down(self, mock_subprocess):
+        """Test that gateway_required apps are stopped when VPN is down."""
+        refresher = PortRefresher(45, '10.2.0.1', 'Folx3-setapp', 'info', 30)
+        
+        # Mock VPN status as disconnected
+        with patch.object(refresher, 'check_vpn_connection') as mock_check:
+            mock_check.return_value = {'connected': False, 'natpmp_supported': False}
+            
+            refresher.check_gateway_required_apps()
+            
+            # Should call stop_folx
+            mock_subprocess.assert_called_with(["osascript", "-e", 'quit app "Folx"'], check=True)
+
+    @patch('protonvpn_public_port_refresh.subprocess.run')
+    def test_check_gateway_required_apps_restart_when_vpn_up(self, mock_subprocess):
+        """Test that gateway_required apps are restarted when VPN comes back up."""
+        refresher = PortRefresher(45, '10.2.0.1', 'Folx3-setapp', 'info', 30)
+        refresher.current_port = 12345  # Set a current port
+        
+        # First call: VPN down (app should be stopped)
+        with patch.object(refresher, 'check_vpn_connection') as mock_check:
+            mock_check.return_value = {'connected': False, 'natpmp_supported': False}
+            refresher.check_gateway_required_apps()
+            
+            # Should call stop_folx
+            self.assertEqual(mock_subprocess.call_count, 1)
+            mock_subprocess.assert_called_with(["osascript", "-e", 'quit app "Folx"'], check=True)
+            
+            # Reset mock for second call
+            mock_subprocess.reset_mock()
+            
+            # Second call: VPN up (app should be restarted)
+            mock_check.return_value = {'connected': True, 'natpmp_supported': True}
+            refresher.check_gateway_required_apps()
+            
+            # Should call set_port and start_folx
+            self.assertEqual(mock_subprocess.call_count, 2)
+            expected_calls = [
+                call(["defaults", "write", "com.eltima.Folx3-setapp", "GeneralUserSettings", "-dict-add", "TorrentTCPPort", str(12345)], check=True),
+                call(["open", "/Applications/Setapp/Folx.app"], check=True)
+            ]
+            mock_subprocess.assert_has_calls(expected_calls)
 
     def test_nat_pmp_path(self):
         """Test NAT_PMP_PATH is properly expanded."""

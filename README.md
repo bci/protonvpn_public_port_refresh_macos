@@ -121,9 +121,22 @@ python3 protonvpn_public_port_refresh.py --loglevel debug --app-control Folx3-se
 
 ## Supported Applications
 
-The script can control macOS applications that support port configuration. Currently supported apps (defined in `APPS_CONFIG`):
+The script can control macOS applications that support port configuration. Applications are configured in the `APPS_CONFIG` dictionary in the script.
 
-### Folx v3 (Setapp) - `Folx3-setapp`
+### APPS_CONFIG Structure
+
+Each application in `APPS_CONFIG` is defined with the following fields:
+
+- **`path`** (string): Full path to the application bundle (e.g., `/Applications/Setapp/Folx.app`)
+- **`defaults`** (string): macOS defaults domain for storing application settings (e.g., `com.eltima.Folx3-setapp`)
+- **`start`** (function): Function to start the application (takes path as argument)
+- **`stop`** (function): Function to stop the application (no arguments)
+- **`status`** (function): Function to get application status information (takes refresher instance as argument)
+- **`gateway_required`** (boolean, optional): If `true`, the app will be stopped when the VPN gateway is missing or offline (default: `false`)
+
+### Currently Supported Apps
+
+#### Folx v3 (Setapp) - `Folx3-setapp`
 
 **Description**: Folx is a download manager and torrent client available via Setapp subscription.
 
@@ -133,13 +146,46 @@ The script can control macOS applications that support port configuration. Curre
 - **Port Setting**: The script updates the `TorrentTCPPort` setting in `GeneralUserSettings` via `defaults write`
 - **Start Command**: Uses `open` to launch the application
 - **Stop Command**: Uses AppleScript to quit the app (`quit app "Folx"`)
+- **Gateway Required**: `false` (app can run without VPN)
 
 **Requirements**:
 - Folx v3 must be installed via Setapp
 - The app must be configured to use the dynamic port for torrent downloads
 - Ensure Folx is set to listen on the configured port in its preferences
 
-To add more apps, edit the `APPS_CONFIG` dictionary in the script with the appropriate paths, defaults domains, and control functions.
+### Adding New Applications
+
+To add support for additional applications, add a new entry to the `APPS_CONFIG` dictionary:
+
+```python
+APPS_CONFIG = {
+    "Folx3-setapp": {
+        "path": "/Applications/Setapp/Folx.app",
+        "defaults": "com.eltima.Folx3-setapp",
+        "start": start_folx,
+        "stop": stop_folx,
+        "status": get_folx_status,
+        "gateway_required": False,
+    },
+    "your-app-name": {
+        "path": "/path/to/your/app.app",
+        "defaults": "com.yourcompany.yourapp",
+        "start": your_start_function,
+        "stop": your_stop_function,
+        "status": your_status_function,
+        "gateway_required": True,  # Stop app when VPN is down
+    },
+}
+```
+
+When `gateway_required` is `true`, the application will be automatically stopped if:
+- The VPN connection is lost
+- The specified gateway IP is not reachable
+- NAT-PMP operations fail
+
+Additionally, when the VPN connection and NAT-PMP support become available again, the application will be automatically restarted with the current port configuration.
+
+This is useful for applications that should only run when the VPN is active and properly configured.
 
 ## Testing
 

@@ -185,6 +185,7 @@ APPS_CONFIG = {
         "start": start_folx,
         "stop": stop_folx,
         "status": get_folx_status,
+        "gateway_required": True,
     },
     # Add more apps here if needed
 }
@@ -220,6 +221,9 @@ class PortRefresher:
         self.prev_ibytes = None
         self.prev_obytes = None
         self.prev_bytes_time = None
+
+        # Gateway required app state tracking
+        self.gateway_required_last_state = {}  # Track last known state for each app
 
         # Setup logging
         loglevel_map = {
@@ -315,10 +319,13 @@ class PortRefresher:
         for app in self.app_control:
             self.control_app(app, "stop")
 
-    def check_vpn_connection(self):
+    def check_vpn_connection(self, quick_check=False):
         """
         Check VPN connection status using terminal commands.
         
+        Args:
+            quick_check (bool): If True, use very short timeouts for fast status checks
+            
         Returns:
             dict: VPN status information
         """
@@ -341,11 +348,16 @@ class PortRefresher:
                         status['interface'] = parts[-1]
                         break
             
-            # Test NAT-PMP support
-            port = self.get_public_port(timeout=self.pmt_timeout)
-            if port is not None:
-                status['natpmp_supported'] = True
-                
+            # Test NAT-PMP support with appropriate timeout
+            if quick_check:
+                # For quick checks, skip NAT-PMP test entirely to avoid blocking
+                status['natpmp_supported'] = 'checking'
+            else:
+                timeout = 5 if quick_check else self.pmt_timeout
+                port = self.get_public_port(timeout=timeout)
+                if port is not None:
+                    status['natpmp_supported'] = True
+                    
         except (subprocess.TimeoutExpired, subprocess.CalledProcessError, FileNotFoundError):
             logging.debug("Could not check VPN connection status")
             
@@ -462,6 +474,50 @@ class PortRefresher:
             return f"{n/1e3:.1f}k"
         else:
             return str(n)
+
+    def check_gateway_required_apps(self):
+        """
+        Check and control applications that require VPN gateway connectivity.
+        
+        Stops any controlled applications that have gateway_required=True
+        when the VPN gateway is not available or NAT-PMP fails.
+        Restarts applications when VPN and NAT-PMP become available again.
+        """
+        # Check VPN status - use cached status if available (for status screen), otherwise do fresh check
+        if hasattr(self, '_cached_vpn_status') and self._cached_vpn_status:
+            status = self._cached_vpn_status
+            # Convert 'checking' to boolean for logic
+            connected = status['connected'] if status['connected'] != 'checking' else False
+            # If we have a current port, NAT-PMP is working regardless of cached status
+            natpmp_supported = (status['natpmp_supported'] if status['natpmp_supported'] != 'checking' 
+                               else (hasattr(self, 'current_port') and self.current_port is not None))
+            vpn_available = connected and natpmp_supported
+        else:
+            # Fallback to fresh check for normal operation
+            status = self.check_vpn_connection()
+            vpn_available = status['connected'] and status['natpmp_supported']
+        
+        for app_name in self.app_control:
+            if app_name in APPS_CONFIG and APPS_CONFIG[app_name].get('gateway_required', False):
+                # Get previous state for this app
+                previous_available = self.gateway_required_last_state.get(app_name, True)  # Default to True for first check
+                
+                if not vpn_available:
+                    # VPN is not available - stop the app if it's running
+                    if previous_available:
+                        logging.info(f"Stopping {app_name} due to VPN/gateway issues")
+                        self.control_app(app_name, "stop")
+                else:
+                    # VPN is available - restart the app if it was previously stopped due to VPN issues
+                    if not previous_available:
+                        logging.info(f"Restarting {app_name} - VPN and NAT-PMP are now available")
+                        # Set the port before starting
+                        if hasattr(self, 'current_port') and self.current_port:
+                            self.control_app(app_name, "set_port")
+                        self.control_app(app_name, "start")
+                
+                # Update the state tracking
+                self.gateway_required_last_state[app_name] = vpn_available
 
     def format_bps(self, bps):
         """
@@ -617,9 +673,12 @@ class PortRefresher:
             # Initialize data
             port_history = []
             log_messages = []
-            last_refresh = time.time()
+            last_refresh = time.time() - self.refresh_seconds  # Force initial data update
             start_time = time.time()
             last_port = None
+            
+            # Cached VPN status for display
+            cached_vpn_status = self._cached_vpn_status
             
             while not self.stopped:
                 try:
@@ -632,6 +691,15 @@ class PortRefresher:
                     # Check for key press (q to quit, r to refresh)
                     key = stdscr.getch()
                     if key == ord('q'):
+                        # Show quitting message
+                        try:
+                            status_win.clear()
+                            status_win.addstr(0, 0, "=" * (width - 1))
+                            status_win.addstr(1, 0, "Quitting...", curses.A_BOLD | curses.color_pair(3))
+                            status_win.refresh()
+                        except curses.error:
+                            pass
+                        self.stopped = True
                         break
                     elif key == ord('r'):
                         # Clear entire screen and force complete redraw
@@ -688,6 +756,48 @@ class PortRefresher:
                         # Clear screen and continue
                         stdscr.clear()
                         continue
+                    
+                    # Update cached VPN status every 10 seconds or on first run
+                    current_time = time.time()
+                    if not hasattr(self, '_last_vpn_check') or current_time - self._last_vpn_check >= 10:
+                        try:
+                            # Only check VPN connection status, preserve NAT-PMP status from background check
+                            quick_status = self.check_vpn_connection(quick_check=True)
+                            # Update connection status but keep existing NAT-PMP status
+                            current_natpmp = self._cached_vpn_status.get('natpmp_supported', 'checking')
+                            # If VPN disconnected, reset NAT-PMP status to checking
+                            if not quick_status['connected']:
+                                current_natpmp = 'checking'
+                            # If VPN just connected and NAT-PMP is still checking, trigger background check
+                            elif quick_status['connected'] and current_natpmp == 'checking' and not hasattr(self, '_natpmp_check_in_progress'):
+                                # Start background NAT-PMP check
+                                def update_natpmp_status():
+                                    try:
+                                        self._natpmp_check_in_progress = True
+                                        port = self.get_public_port(timeout=self.pmt_timeout)
+                                        # Update cached status
+                                        self._cached_vpn_status['natpmp_supported'] = True if port else False
+                                    except Exception as e:
+                                        logging.debug(f"NAT-PMP check failed: {e}")
+                                        self._cached_vpn_status['natpmp_supported'] = False
+                                    finally:
+                                        if hasattr(self, '_natpmp_check_in_progress'):
+                                            delattr(self, '_natpmp_check_in_progress')
+                                
+                                ntpmp_thread = threading.Thread(target=update_natpmp_status)
+                                ntpmp_thread.daemon = True
+                                ntpmp_thread.start()
+                            
+                            self._cached_vpn_status = {
+                                'connected': quick_status['connected'],
+                                'gateway': quick_status['gateway'],
+                                'interface': quick_status['interface'],
+                                'natpmp_supported': current_natpmp  # Preserve NAT-PMP status
+                            }
+                            self._last_vpn_check = current_time
+                            cached_vpn_status = self._cached_vpn_status
+                        except Exception as e:
+                            logging.debug(f"VPN status check failed: {e}")
                     
                     # Update data every refresh interval
                     if current_time - last_refresh >= self.refresh_seconds:
@@ -764,8 +874,11 @@ class PortRefresher:
                         vpn_height, vpn_width = vpn_win.getmaxyx()
                         max_vpn_text_width = vpn_width - 3  # Leave margin for borders
                         
-                        status = self.check_vpn_connection()
-                        if status['connected']:
+                        status = cached_vpn_status
+                        if status['connected'] == 'checking':
+                            vpn_win.addstr(1, 1, f"Status: Checking...", curses.color_pair(3))
+                            vpn_win.addstr(2, 1, f"Interface: Checking...")
+                        elif status['connected']:
                             vpn_win.addstr(1, 1, f"Status: Connected", curses.color_pair(1))
                             interface_line = f"Interface: {status['interface'] or 'Unknown'}"
                             if len(interface_line) > max_vpn_text_width:
@@ -775,7 +888,9 @@ class PortRefresher:
                             vpn_win.addstr(1, 1, f"Status: Disconnected", curses.color_pair(2))
                             vpn_win.addstr(2, 1, f"Interface: N/A")
                         
-                        if status['natpmp_supported']:
+                        if status['natpmp_supported'] == 'checking':
+                            vpn_win.addstr(3, 1, f"NAT-PMP: Checking...", curses.color_pair(3))
+                        elif status['natpmp_supported']:
                             vpn_win.addstr(3, 1, f"NAT-PMP: Supported", curses.color_pair(1))
                         else:
                             vpn_win.addstr(3, 1, f"NAT-PMP: Not supported", curses.color_pair(2))
@@ -982,9 +1097,9 @@ class PortRefresher:
             # Handle curses initialization errors
             try:
                 curses.endwin()
-                print(f"Curses error: {e}")
+                logging.error(f"Curses error: {e}")
             except:
-                print(f"Error initializing curses: {e}")
+                logging.error(f"Error initializing curses: {e}")
         finally:
             # Clean up logging handler
             try:
@@ -1009,25 +1124,59 @@ class PortRefresher:
             status_refresh: Status screen refresh interval in seconds
         """
         import io
+        import sys
         
-        # Check VPN connection and set interface for packet counting
-        status = self.check_vpn_connection()
-        if status['connected']:
-            self.interface = status['interface']
-            logging.info(f"VPN interface detected: {self.interface}")
-        else:
-            logging.warning("VPN not connected. Packet counts will not be available until connected.")
-            self.interface = None
+        # Redirect stdout and stderr to prevent any print statements from appearing
+        old_stdout = sys.stdout
+        old_stderr = sys.stderr
+        sys.stdout = io.StringIO()
+        sys.stderr = io.StringIO()
         
-        # Set up logging capture before starting operation
+        # Set up logging capture FIRST before any operations
         log_capture = io.StringIO()
         log_handler = logging.StreamHandler(log_capture)
         log_handler.setLevel(logging.DEBUG)  # Capture all log levels
         log_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
-        logging.getLogger().addHandler(log_handler)
+        
+        # Replace all handlers on the root logger with our StringIO handler
+        root_logger = logging.getLogger()
+        for handler in root_logger.handlers[:]:
+            root_logger.removeHandler(handler)
+        root_logger.addHandler(log_handler)
+        root_logger.setLevel(logging.DEBUG)  # Ensure all levels are logged
         
         try:
             import threading
+            
+            # Initialize with "checking" status to avoid blocking UI
+            initial_status = {
+                'connected': 'checking',
+                'gateway': self.vpn_gateway,
+                'interface': None,
+                'natpmp_supported': 'checking'
+            }
+            self._cached_vpn_status = initial_status
+            self._last_vpn_check = time.time()
+            
+            # Start background thread for VPN status check
+            def update_vpn_status():
+                try:
+                    full_status = self.check_vpn_connection(quick_check=False)
+                    # Update cached status
+                    self._cached_vpn_status = full_status
+                    # Update interface if connected
+                    if full_status['connected'] and not self.interface:
+                        self.interface = full_status['interface']
+                        logging.info(f"VPN interface detected: {self.interface}")
+                    elif not full_status['connected']:
+                        logging.warning("VPN not connected. Packet counts will not be available until connected.")
+                        self.interface = None
+                except Exception as e:
+                    logging.debug(f"Background VPN check failed: {e}")
+            
+            status_thread = threading.Thread(target=update_vpn_status)
+            status_thread.daemon = True
+            status_thread.start()
             
             # Start the port refreshing operation in a separate thread
             operation_thread = threading.Thread(target=self.run_operation_loop, args=(args,))
@@ -1040,7 +1189,11 @@ class PortRefresher:
             # Stop the operation when curses exits
             self.stopped = True
             operation_thread.join(timeout=1.0)
+            status_thread.join(timeout=1.0)
         finally:
+            # Restore stdout and stderr
+            sys.stdout = old_stdout
+            sys.stderr = old_stderr
             # Clean up logging handler
             logging.getLogger().removeHandler(log_handler)
     
@@ -1056,12 +1209,19 @@ class PortRefresher:
             # Initialize current port
             self.current_port = None
             
+            # Wait for initial status check to complete before starting port operations
+            time.sleep(2)
+            
             while not self.stopped:
                 try:
                     # Get current port
                     current_port = self.get_public_port(timeout=self.pmt_timeout)
                     if current_port:
                         logging.info(f"Port refreshed: {current_port}")
+                        
+                        # Update cached NAT-PMP status if it's still checking
+                        if hasattr(self, '_cached_vpn_status') and self._cached_vpn_status.get('natpmp_supported') == 'checking':
+                            self._cached_vpn_status['natpmp_supported'] = True
                         
                         # Control apps only if port changed
                         if self.app_control and current_port != self.current_port:
@@ -1079,11 +1239,13 @@ class PortRefresher:
                         logging.warning("Port refresh failed")
                     
                     # Wait for next refresh
-                    for _ in range(self.refresh_seconds):
+                    for _ in range(self.refresh_seconds * 10):  # Check every 0.1 seconds
                         if self.stopped:
                             break
-                        time.sleep(1)
-                        
+                        time.sleep(0.1)
+                    
+                    # Check gateway_required apps - stop them if VPN is down
+                    self.check_gateway_required_apps()
                 except Exception as e:
                     logging.error(f"Error in operation loop: {e}")
                     time.sleep(5)  # Wait before retrying
@@ -1178,6 +1340,10 @@ class PortRefresher:
                 if status['connected']:
                     self.interface = status['interface']
                     logging.info(f"VPN interface detected: {self.interface}")
+            
+            # Check gateway_required apps - stop them if VPN is down
+            self.check_gateway_required_apps()
+            
             ipkts, opkts = self.get_packet_counts()
             formatted_in = self.format_count(ipkts)
             formatted_out = self.format_count(opkts)
@@ -1232,6 +1398,11 @@ def main():
     # Handle terminal integration features
     if args.status:
         logging.debug("Status screen requested")
+        # Remove console handler to prevent logs from appearing on console during status screen
+        root_logger = logging.getLogger()
+        for handler in root_logger.handlers[:]:
+            if isinstance(handler, logging.StreamHandler) and hasattr(handler, 'stream') and handler.stream in (sys.stdout, sys.stderr):
+                root_logger.removeHandler(handler)
         # Create refresher for status screen
         refresher = PortRefresher(args.refresh_seconds, args.vpn_gateway, args.app_control, args.loglevel, args.pmt_timeout)
         # Run curses status screen with normal operation
