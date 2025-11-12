@@ -656,8 +656,12 @@ class PortRefresher:
                         
                         for i, (port, timestamp) in enumerate(reversed(port_history)):
                             if i < vpn_ports_height - 2:  # Show entries up to window height minus borders
-                                time_str = timestamp.strftime("%H:%M:%S")
-                                ports_win.addstr(i+1, 1, f"{time_str}: {port}")
+                                time_str = timestamp.strftime("%Y-%m-%d %H:%M:%S")
+                                port_line = f"{time_str}: {port}"
+                                # Truncate if too long
+                                if len(port_line) > ports_width - 3:
+                                    port_line = port_line[:ports_width - 6] + "..."
+                                ports_win.addstr(i+1, 1, port_line)
                     except curses.error:
                         pass
                     
