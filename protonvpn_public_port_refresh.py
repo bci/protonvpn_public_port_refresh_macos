@@ -75,6 +75,7 @@ NOTES:
 """
 
 import argparse
+import curses
 import logging
 import os
 import signal
@@ -329,10 +330,10 @@ class PortRefresher:
 
     def get_packet_counts(self):
         """
-        Get packet counts for the VPN interface from netstat -i.
+        Get byte counts for the VPN interface from netstat -i.
         
         Returns:
-            tuple: (input_packets, output_packets) or (None, None) if not found
+            tuple: (input_bytes, output_bytes) or (None, None) if not found
         """
         if not self.interface:
             return None, None
@@ -350,10 +351,10 @@ class PortRefresher:
             if parts and parts[0] == self.interface and not parts[2].startswith('<Link'):
                 logging.debug(f"Found interface line: {parts}")
                 try:
-                    ipkts = int(parts[4])  # Ipkts
-                    opkts = int(parts[6])  # Opkts
-                    logging.debug(f"Parsed ipkts: {ipkts}, opkts: {opkts}")
-                    return ipkts, opkts
+                    ibytes = int(parts[6])  # Ibytes
+                    obytes = int(parts[9])  # Obytes
+                    logging.debug(f"Parsed ibytes: {ibytes}, obytes: {obytes}")
+                    return ibytes, obytes
                 except (IndexError, ValueError) as e:
                     logging.debug(f"Parse error: {e}")
                     pass
@@ -382,6 +383,447 @@ class PortRefresher:
             return f"{n/1e3:.1f}k"
         else:
             return str(n)
+
+    def format_time(self, seconds):
+        """
+        Format seconds into HH:MM:SS duration format.
+        
+        Args:
+            seconds (int): Number of seconds
+            
+        Returns:
+            str: Formatted time string
+        """
+        hours = seconds // 3600
+        minutes = (seconds % 3600) // 60
+        secs = seconds % 60
+        return f"{hours:02d}:{minutes:02d}:{secs:02d}"
+
+    def curses_status_screen(self, stdscr, timeout=None):
+        """
+        Display real-time status screen using curses.
+        
+        Args:
+            stdscr: Curses screen object
+            timeout: Optional timeout in seconds, None for indefinite
+        """
+    def curses_status_screen(self, stdscr, timeout=None):
+        """
+        Display real-time status screen using curses.
+        
+        Args:
+            stdscr: Curses screen object
+            timeout: Optional timeout in seconds, None for indefinite
+        """
+        # Set up logging and stdout capture for activity log
+        import io
+        import sys
+        
+        # Create a custom stream that writes to both logging and the original stream
+        class LoggingStream(io.StringIO):
+            def __init__(self, original_stream, logger):
+                super().__init__()
+                self.original_stream = original_stream
+                self.logger = logger
+                
+            def write(self, text):
+                if text.strip():  # Only log non-empty text
+                    self.logger.info(text.rstrip())
+                self.original_stream.write(text)
+                
+            def flush(self):
+                self.original_stream.flush()
+        
+        # Replace stdout with logging stream
+        old_stdout = sys.stdout
+        logging_stream = LoggingStream(old_stdout, logging.getLogger())
+        sys.stdout = logging_stream
+        
+        # Set up logging capture for activity log
+        log_capture = io.StringIO()
+        log_handler = logging.StreamHandler(log_capture)
+        log_handler.setLevel(logging.getLogger().level)
+        log_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
+        logging.getLogger().addHandler(log_handler)
+        
+        try:
+            # Initialize curses
+            curses.curs_set(0)  # Hide cursor
+            stdscr.nodelay(True)  # Non-blocking input
+            stdscr.timeout(1000)  # Refresh every second
+            
+            # Color pairs
+            curses.start_color()
+            curses.init_pair(1, curses.COLOR_GREEN, curses.COLOR_BLACK)  # Success
+            curses.init_pair(2, curses.COLOR_RED, curses.COLOR_BLACK)    # Error
+            curses.init_pair(3, curses.COLOR_YELLOW, curses.COLOR_BLACK) # Warning
+            curses.init_pair(4, curses.COLOR_CYAN, curses.COLOR_BLACK)   # Info
+            curses.init_pair(5, curses.COLOR_WHITE, curses.COLOR_BLACK)  # Normal
+            
+            height, width = stdscr.getmaxyx()
+            
+            # Ensure minimum size
+            if height < 20 or width < 80:
+                stdscr.addstr(0, 0, "Terminal too small. Need at least 80x20.", curses.color_pair(2))
+                stdscr.refresh()
+                stdscr.getch()
+                return
+            
+            # Create windows with safe dimensions
+            title_height = min(3, height - 1)
+            status_height = min(5, height - 1)
+            vpn_width = max(1, width // 2)
+            ports_width = max(1, width - vpn_width)
+            # Make VPN and ports windows the same height
+            vpn_ports_height = min(10, (height - title_height - status_height - 1) // 2)
+            logs_height = max(1, height - title_height - vpn_ports_height - status_height)
+            
+            title_win = curses.newwin(title_height, width, 0, 0)
+            vpn_win = curses.newwin(vpn_ports_height, vpn_width, title_height, 0)
+            ports_win = curses.newwin(vpn_ports_height, ports_width, title_height, vpn_width)
+            logs_win = curses.newwin(logs_height, width, title_height + vpn_ports_height, 0)
+            status_win = curses.newwin(status_height, width, height - status_height, 0)
+            
+            # Initialize data
+            port_history = []
+            log_messages = []
+            last_refresh = time.time()
+            start_time = time.time()
+            last_port = None
+            
+            while not self.stopped:
+                try:
+                    current_time = time.time()
+                    
+                    # Check for timeout
+                    if timeout and (current_time - start_time) >= timeout:
+                        break
+                    
+                    # Check for key press (q to quit, r to refresh)
+                    key = stdscr.getch()
+                    if key == ord('q'):
+                        break
+                    elif key == ord('r'):
+                        # Clear entire screen and force complete redraw
+                        stdscr.clear()
+                        title_win.clear()
+                        vpn_win.clear()
+                        ports_win.clear()
+                        logs_win.clear()
+                        status_win.clear()
+                        stdscr.refresh()
+                        continue
+                    
+                    # Check if terminal was resized
+                    new_height, new_width = stdscr.getmaxyx()
+                    if new_height != height or new_width != width:
+                        # Terminal resized - check if still valid size
+                        if new_height < 20 or new_width < 80:
+                            # Too small, show error and wait for valid resize or quit
+                            stdscr.clear()
+                            stdscr.addstr(0, 0, f"Terminal too small: {new_width}x{new_height}. Need at least 80x20.", curses.color_pair(2))
+                            stdscr.addstr(2, 0, "Resize terminal or press 'q' to quit.")
+                            stdscr.refresh()
+                            # Wait for resize or quit
+                            while True:
+                                key = stdscr.getch()
+                                if key == ord('q'):
+                                    return
+                                check_h, check_w = stdscr.getmaxyx()
+                                if check_h >= 20 and check_w >= 80:
+                                    break
+                                time.sleep(0.1)
+                        
+                        # Update dimensions
+                        height, width = new_height, new_width
+                        
+                        # Recalculate window dimensions
+                        title_height = min(3, height - 1)
+                        status_height = min(5, height - 1)
+                        vpn_width = max(1, width // 2)
+                        ports_width = max(1, width - vpn_width)
+                        vpn_ports_height = min(10, (height - title_height - status_height - 1) // 2)
+                        logs_height = max(1, height - title_height - vpn_ports_height - status_height)
+                        
+                        # Recreate windows with new dimensions
+                        title_win = curses.newwin(title_height, width, 0, 0)
+                        vpn_win = curses.newwin(vpn_ports_height, vpn_width, title_height, 0)
+                        ports_win = curses.newwin(vpn_ports_height, ports_width, title_height, vpn_width)
+                        logs_win = curses.newwin(logs_height, width, title_height + vpn_ports_height, 0)
+                        status_win = curses.newwin(status_height, width, height - status_height, 0)
+                        
+                        # Clear screen and continue
+                        stdscr.clear()
+                        continue
+                    
+                    # Update data every refresh interval
+                    if current_time - last_refresh >= self.refresh_seconds:
+                        # Get current port
+                        current_port = self.get_public_port(timeout=self.pmt_timeout)
+                        
+                        # Only add to history if port changed
+                        if current_port is not None and current_port != last_port:
+                            port_history.append((current_port, datetime.now()))
+                            # Keep only last 5 ports
+                            port_history = port_history[-5:]
+                            last_port = current_port
+                        
+                        # Get packet counts
+                        ipkts, opkts = self.get_packet_counts()
+                        
+                        last_refresh = current_time
+                    
+                    # Update log messages from captured logs
+                    log_content = log_capture.getvalue()
+                    if log_content:
+                        new_lines = log_content.split('\n')
+                        for line in new_lines:
+                            if line.strip():
+                                # Parse timestamp and message - handle both logging format and plain prints
+                                if ' - ' in line and len(line.split(' - ', 2)) >= 3:
+                                    # Standard logging format: timestamp - level - message
+                                    parts = line.split(' - ', 2)
+                                    timestamp_str, level, message = parts
+                                    try:
+                                        # Extract time part from timestamp
+                                        time_part = timestamp_str.split()[1] if len(timestamp_str.split()) > 1 else timestamp_str
+                                        log_messages.append(f"[{time_part}] {level}: {message}")
+                                    except:
+                                        log_messages.append(f"[{datetime.now().strftime('%H:%M:%S')}] {line}")
+                                else:
+                                    # Plain print output or other format
+                                    log_messages.append(f"[{datetime.now().strftime('%H:%M:%S')}] {line}")
+                        log_messages = log_messages[-20:]  # Keep last 20 messages
+                        log_capture.seek(0)
+                        log_capture.truncate(0)
+                    
+                    # Clear and redraw windows
+                    title_win.clear()
+                    vpn_win.clear()
+                    ports_win.clear()
+                    logs_win.clear()
+                    status_win.clear()
+                    
+                    # Title - safe writing
+                    try:
+                        title_win.addstr(0, 0, "ProtonVPN Public Port Refresh - Real-time Status", curses.A_BOLD | curses.color_pair(4))
+                        title_win.addstr(1, 0, f"Gateway: {self.vpn_gateway} | Refresh: {self.refresh_seconds}s | Press 'q' to quit, 'r' to refresh")
+                        title_win.addstr(2, 0, "=" * (width - 1))
+                    except curses.error:
+                        pass
+                    
+                    # VPN Status - safe writing
+                    try:
+                        vpn_win.box()
+                        vpn_win.addstr(0, 2, " VPN Status ", curses.A_BOLD)
+                        
+                        status = self.check_vpn_connection()
+                        if status['connected']:
+                            vpn_win.addstr(1, 1, f"Status: Connected", curses.color_pair(1))
+                            vpn_win.addstr(2, 1, f"Interface: {status['interface'] or 'Unknown'}")
+                        else:
+                            vpn_win.addstr(1, 1, f"Status: Disconnected", curses.color_pair(2))
+                            vpn_win.addstr(2, 1, f"Interface: N/A")
+                        
+                        if status['natpmp_supported']:
+                            vpn_win.addstr(3, 1, f"NAT-PMP: Supported", curses.color_pair(1))
+                        else:
+                            vpn_win.addstr(3, 1, f"NAT-PMP: Not supported", curses.color_pair(2))
+                        
+                        # Show gateway info
+                        vpn_win.addstr(4, 1, f"Gateway: {self.vpn_gateway}")
+                        
+                        # Show current port if available
+                        if hasattr(self, 'current_port') and self.current_port:
+                            vpn_win.addstr(5, 1, f"Current Port: {self.current_port}")
+                    except curses.error:
+                        pass
+                    
+                    # Port History - safe writing
+                    try:
+                        ports_win.box()
+                        ports_win.addstr(0, 2, " Port History ", curses.A_BOLD)
+                        
+                        for i, (port, timestamp) in enumerate(reversed(port_history)):
+                            if i < vpn_ports_height - 2:  # Show entries up to window height minus borders
+                                time_str = timestamp.strftime("%H:%M:%S")
+                                ports_win.addstr(i+1, 1, f"{time_str}: {port}")
+                    except curses.error:
+                        pass
+                    
+                    # Logs - safe writing
+                    try:
+                        logs_win.box()
+                        logs_win.addstr(0, 2, " Activity Log ", curses.A_BOLD)
+                        
+                        for i, msg in enumerate(reversed(log_messages)):
+                            if i < logs_win.getmaxyx()[0] - 2:
+                                # Color code based on log level
+                                if 'ERROR' in msg or 'CRITICAL' in msg:
+                                    color = curses.color_pair(2)
+                                elif 'WARNING' in msg:
+                                    color = curses.color_pair(3)
+                                elif 'INFO' in msg:
+                                    color = curses.color_pair(4)
+                                else:
+                                    color = curses.color_pair(5)
+                                logs_win.addstr(i+1, 1, msg, color)
+                    except curses.error:
+                        pass
+                    
+                    # Status Bar - safe writing
+                    try:
+                        status_win.addstr(0, 0, "=" * (width - 1))
+                        
+                        # Calculate time running and refresh countdown
+                        time_running = int(current_time - start_time)
+                        time_since_refresh = current_time - last_refresh
+                        refresh_countdown = max(0, self.refresh_seconds - int(time_since_refresh))
+                        
+                        # Format times as HH:MM:SS
+                        running_str = self.format_time(time_running)
+                        refresh_str = self.format_time(refresh_countdown)
+                        
+                        status_line = f"Running: {running_str} | Next refresh: {refresh_str}"
+                        
+                        # Add timeout countdown if active
+                        if timeout:
+                            timeout_remaining = max(0, int(timeout - (current_time - start_time)))
+                            timeout_str = self.format_time(timeout_remaining)
+                            status_line += f" | Timeout: {timeout_str}"
+                        
+                        status_line += " | "
+                        status_win.addstr(1, 0, status_line, curses.color_pair(3))
+                        
+                        # Show current packet counts if available
+                        ipkts, opkts = self.get_packet_counts()
+                        if ipkts is not None and opkts is not None:
+                            status_win.addstr(f"Bytes In: {self.format_count(ipkts)} | Out: {self.format_count(opkts)}", curses.color_pair(4))
+                        
+                        status_win.addstr(2, 0, "Press 'q' to quit | 'r' to refresh | Ctrl+C to stop")
+                    except curses.error:
+                        pass
+                    
+                    # Refresh all windows
+                    title_win.refresh()
+                    vpn_win.refresh()
+                    ports_win.refresh()
+                    logs_win.refresh()
+                    status_win.refresh()
+                    
+                    # Refresh screen
+                    stdscr.refresh()
+                    
+                    # Small delay to prevent excessive CPU usage
+                    time.sleep(0.1)
+                    
+                except KeyboardInterrupt:
+                    break
+                except Exception as e:
+                    # Handle any errors gracefully
+                    try:
+                        stdscr.clear()
+                        stdscr.addstr(0, 0, f"Error: {str(e)}")
+                        stdscr.refresh()
+                        time.sleep(2)
+                    except:
+                        pass
+                    break
+            
+        except Exception as e:
+            # Handle curses initialization errors
+            try:
+                curses.endwin()
+                print(f"Curses error: {e}")
+            except:
+                print(f"Error initializing curses: {e}")
+        finally:
+            # Clean up logging handler and restore stdout
+            try:
+                logging.getLogger().removeHandler(log_handler)
+                sys.stdout = old_stdout
+            except:
+                pass
+            # Clean up curses
+            try:
+                curses.endwin()
+            except:
+                pass
+
+    def curses_status_screen_with_operation(self, stdscr, timeout=None, args=None):
+        """
+        Display real-time status screen while running normal port refreshing operation.
+        
+        Args:
+            stdscr: Curses screen object
+            timeout: Optional timeout in seconds, None for indefinite
+            args: Command line arguments
+        """
+        import threading
+        
+        # Start the port refreshing operation in a separate thread
+        operation_thread = threading.Thread(target=self.run_operation_loop, args=(args,))
+        operation_thread.daemon = True
+        operation_thread.start()
+        
+        # Run the curses status screen
+        self.curses_status_screen(stdscr, timeout)
+        
+        # Stop the operation when curses exits
+        self.stopped = True
+        operation_thread.join(timeout=1.0)
+    
+    def run_operation_loop(self, args):
+        """
+        Run the normal port refreshing operation loop.
+        
+        Args:
+            args: Command line arguments
+        """
+        try:
+            logging.info("Starting port refresh operation")
+            # Initialize current port
+            self.current_port = None
+            
+            while not self.stopped:
+                try:
+                    # Get current port
+                    current_port = self.get_public_port(timeout=self.pmt_timeout)
+                    if current_port:
+                        logging.info(f"Port refreshed: {current_port}")
+                        
+                        # Control apps only if port changed
+                        if self.app_control and current_port != self.current_port:
+                            if self.current_port is not None:  # Not the first time
+                                logging.info("Restarting controlled apps due to port change")
+                                self.stop_apps()
+                                time.sleep(2)  # Brief wait
+                            self.current_port = current_port
+                            self.start_apps()
+                        elif self.current_port is None:  # First successful port acquisition
+                            self.current_port = current_port
+                            if self.app_control:
+                                self.start_apps()
+                    else:
+                        logging.warning("Port refresh failed")
+                    
+                    # Wait for next refresh
+                    for _ in range(self.refresh_seconds):
+                        if self.stopped:
+                            break
+                        time.sleep(1)
+                        
+                except Exception as e:
+                    logging.error(f"Error in operation loop: {e}")
+                    time.sleep(5)  # Wait before retrying
+                    
+        except Exception as e:
+            logging.error(f"Fatal error in operation loop: {e}")
+        finally:
+            # Clean up apps when stopping
+            if self.app_control:
+                logging.info("Stopping controlled apps")
+                self.stop_apps()
 
     def run(self):
         """
@@ -495,6 +937,8 @@ def main():
     parser.add_argument("--vpn-status", action="store_true", help="Check and display VPN connection status")
     parser.add_argument("--diagnostics", action="store_true", help="Run network diagnostics")
     parser.add_argument("--network-info", action="store_true", help="Display network information")
+    parser.add_argument("--status", action="store_true", help="Show real-time status screen with curses interface")
+    parser.add_argument("--status-timeout", type=int, default=None, help="Timeout for status screen in seconds (default: no timeout)")
 
     args = parser.parse_args()
 
@@ -511,9 +955,16 @@ def main():
     numeric_level = loglevel_map[args.loglevel.lower()]
     logging.basicConfig(level=numeric_level, format='%(asctime)s - %(levelname)s - %(message)s')
 
-    logging.debug(f"Parsed arguments: refresh_seconds={args.refresh_seconds}, vpn_gateway={args.vpn_gateway}, app_control='{args.app_control}', loglevel={args.loglevel}, pmt_timeout={args.pmt_timeout}, app_list={args.app_list}, vpn_status={args.vpn_status}, diagnostics={args.diagnostics}, network_info={args.network_info}")
+    logging.debug(f"Parsed arguments: refresh_seconds={args.refresh_seconds}, vpn_gateway={args.vpn_gateway}, app_control='{args.app_control}', loglevel={args.loglevel}, pmt_timeout={args.pmt_timeout}, app_list={args.app_list}, vpn_status={args.vpn_status}, diagnostics={args.diagnostics}, network_info={args.network_info}, status={args.status}")
 
     # Handle terminal integration features
+    if args.status:
+        logging.debug("Status screen requested")
+        # Create refresher for status screen
+        refresher = PortRefresher(args.refresh_seconds, args.vpn_gateway, args.app_control, args.loglevel, args.pmt_timeout)
+        # Run curses status screen with normal operation
+        curses.wrapper(refresher.curses_status_screen_with_operation, args.status_timeout, args)
+        return
     if args.vpn_status:
         logging.debug("VPN status check requested")
         # Create a temporary refresher just for status checking

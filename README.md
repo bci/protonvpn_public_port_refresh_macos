@@ -82,6 +82,8 @@ python3 protonvpn_public_port_refresh.py
 - `--network-info`: Display network information
 - `--pmt-timeout PMT_TIMEOUT`: Timeout for NAT-PMP operations in seconds (default: 30)
 - `--refresh-seconds SECONDS`: Interval to refresh port (default: 45)
+- `--status`: Show real-time status screen with curses interface
+- `--status-timeout TIMEOUT`: Timeout for status screen in seconds (default: no timeout)
 - `--vpn-gateway GATEWAY`: VPN gateway IP (default: 10.2.0.1)
 - `--vpn-status`: Check and display VPN connection status
 
@@ -102,9 +104,14 @@ python3 protonvpn_public_port_refresh.py --app-control Folx3-setapp --refresh-se
 python3 protonvpn_public_port_refresh.py --vpn-status
 ```
 
-#### Run Diagnostics
+#### Show Real-time Status Screen
 ```bash
-python3 protonvpn_public_port_refresh.py --diagnostics
+python3 protonvpn_public_port_refresh.py --status
+```
+
+#### Show Status Screen with Timeout
+```bash
+python3 protonvpn_public_port_refresh.py --status --status-timeout 30
 ```
 
 #### Verbose Logging
