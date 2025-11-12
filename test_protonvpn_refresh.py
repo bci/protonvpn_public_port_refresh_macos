@@ -359,10 +359,11 @@ class TestArgumentParsing(unittest.TestCase):
         mock_refresher.assert_called_once_with(45, '10.2.0.1', '', 'info', 30)
         # Check that curses.wrapper was called with status screen
         mock_curses.wrapper.assert_called_once()
-        # The wrapper should be called with function, timeout, and args
+        # The wrapper should be called with function, timeout, args, and status_refresh
         args, kwargs = mock_curses.wrapper.call_args
-        self.assertEqual(len(args), 3)  # function, timeout, args
+        self.assertEqual(len(args), 4)  # function, timeout, args, status_refresh
         self.assertIsNone(args[1])  # timeout should be None
+        self.assertEqual(args[3], 5)  # status_refresh should be 5 (default)
 
     @patch('protonvpn_public_port_refresh.curses')
     @patch('protonvpn_public_port_refresh.PortRefresher')
@@ -376,10 +377,11 @@ class TestArgumentParsing(unittest.TestCase):
         mock_refresher.assert_called_once_with(45, '10.2.0.1', '', 'info', 30)
         # Check that curses.wrapper was called with status screen
         mock_curses.wrapper.assert_called_once()
-        # The wrapper should be called with function, timeout, and args
+        # The wrapper should be called with function, timeout, args, and status_refresh
         args, kwargs = mock_curses.wrapper.call_args
-        self.assertEqual(len(args), 3)  # function, timeout, args
+        self.assertEqual(len(args), 4)  # function, timeout, args, status_refresh
         self.assertEqual(args[1], 30)  # timeout should be 30
+        self.assertEqual(args[3], 5)  # status_refresh should be 5 (default)
 
 
 if __name__ == '__main__':

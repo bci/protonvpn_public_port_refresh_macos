@@ -409,7 +409,7 @@ class PortRefresher:
             stdscr: Curses screen object
             timeout: Optional timeout in seconds, None for indefinite
         """
-    def curses_status_screen(self, stdscr, timeout=None, log_capture=None):
+    def curses_status_screen(self, stdscr, timeout=None, log_capture=None, status_refresh=5):
         """
         Display real-time status screen using curses.
         
@@ -417,6 +417,7 @@ class PortRefresher:
             stdscr: Curses screen object
             timeout: Optional timeout in seconds, None for indefinite
             log_capture: StringIO object for capturing logs (optional)
+            status_refresh: Status screen refresh interval in seconds
         """
         # Set up logging and stdout capture for activity log
         import io
@@ -437,7 +438,7 @@ class PortRefresher:
             # Initialize curses
             curses.curs_set(0)  # Hide cursor
             stdscr.nodelay(True)  # Non-blocking input
-            stdscr.timeout(1000)  # Refresh every second
+            stdscr.timeout(status_refresh * 1000)  # Refresh every status_refresh seconds
             
             # Color pairs
             curses.start_color()
@@ -781,7 +782,7 @@ class PortRefresher:
             except:
                 pass
 
-    def curses_status_screen_with_operation(self, stdscr, timeout=None, args=None):
+    def curses_status_screen_with_operation(self, stdscr, timeout=None, args=None, status_refresh=5):
         """
         Display real-time status screen while running normal port refreshing operation.
         
@@ -789,6 +790,7 @@ class PortRefresher:
             stdscr: Curses screen object
             timeout: Optional timeout in seconds, None for indefinite
             args: Command line arguments
+            status_refresh: Status screen refresh interval in seconds
         """
         import io
         
@@ -817,7 +819,7 @@ class PortRefresher:
             operation_thread.start()
             
             # Run the curses status screen
-            self.curses_status_screen(stdscr, timeout, log_capture)
+            self.curses_status_screen(stdscr, timeout, log_capture, status_refresh)
             
             # Stop the operation when curses exits
             self.stopped = True
@@ -992,6 +994,7 @@ def main():
     parser.add_argument("--network-info", action="store_true", help="Display network information")
     parser.add_argument("--status", action="store_true", help="Show real-time status screen with curses interface")
     parser.add_argument("--status-timeout", type=int, default=None, help="Timeout for status screen in seconds (default: no timeout)")
+    parser.add_argument("--status-refresh", type=int, default=5, help="Status screen refresh interval in seconds (default: 5)")
 
     args = parser.parse_args()
 
@@ -1008,7 +1011,7 @@ def main():
     numeric_level = loglevel_map[args.loglevel.lower()]
     logging.basicConfig(level=numeric_level, format='%(asctime)s - %(levelname)s - %(message)s')
 
-    logging.debug(f"Parsed arguments: refresh_seconds={args.refresh_seconds}, vpn_gateway={args.vpn_gateway}, app_control='{args.app_control}', loglevel={args.loglevel}, pmt_timeout={args.pmt_timeout}, app_list={args.app_list}, vpn_status={args.vpn_status}, diagnostics={args.diagnostics}, network_info={args.network_info}, status={args.status}")
+    logging.debug(f"Parsed arguments: refresh_seconds={args.refresh_seconds}, vpn_gateway={args.vpn_gateway}, app_control='{args.app_control}', loglevel={args.loglevel}, pmt_timeout={args.pmt_timeout}, app_list={args.app_list}, vpn_status={args.vpn_status}, diagnostics={args.diagnostics}, network_info={args.network_info}, status={args.status}, status_timeout={args.status_timeout}, status_refresh={args.status_refresh}")
 
     # Handle terminal integration features
     if args.status:
@@ -1016,7 +1019,7 @@ def main():
         # Create refresher for status screen
         refresher = PortRefresher(args.refresh_seconds, args.vpn_gateway, args.app_control, args.loglevel, args.pmt_timeout)
         # Run curses status screen with normal operation
-        curses.wrapper(refresher.curses_status_screen_with_operation, args.status_timeout, args)
+        curses.wrapper(refresher.curses_status_screen_with_operation, args.status_timeout, args, args.status_refresh)
         return
     if args.vpn_status:
         logging.debug("VPN status check requested")
