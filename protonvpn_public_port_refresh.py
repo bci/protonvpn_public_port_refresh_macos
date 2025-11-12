@@ -468,8 +468,12 @@ class PortRefresher:
             ipkts, opkts = self.get_packet_counts()
             formatted_in = self.format_count(ipkts)
             formatted_out = self.format_count(opkts)
-            logging.info(f"Public port: {self.current_port} (in: {formatted_in}, out: {formatted_out}), changed {self.port_changed_count} time(s), last at {self.last_change_time}")
-            logging.info(f"Next refresh in {self.refresh_seconds} seconds (gateway: {self.vpn_gateway}). Press Ctrl+C to stop.")
+            
+            # Format timestamp for cleaner display
+            timestamp_str = self.last_change_time.strftime("%H:%M:%S")
+            
+            logging.info(f"Public port: {self.current_port} (in: {formatted_in}, out: {formatted_out}) | Changed: {self.port_changed_count} | Last: {timestamp_str}")
+            logging.info(f"Next refresh in {self.refresh_seconds}s (gateway: {self.vpn_gateway}) | Ctrl+C to stop")
 
         logging.info("Stopping refresher")
         if self.app_control:
