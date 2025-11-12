@@ -332,7 +332,7 @@ class PortRefresher:
 
     def get_packet_counts(self):
         """
-        Get byte counts for the VPN interface from netstat -i.
+        Get byte counts for the VPN interface from netstat -ib.
         
         Returns:
             tuple: (input_bytes, output_bytes) or (None, None) if not found
@@ -340,27 +340,27 @@ class PortRefresher:
         if not self.interface:
             return None, None
         
-        result = self.run_diagnostic_command("netstat -i")
-        logging.debug(f"netstat -i success: {result['success']}, output length: {len(result['output'])}, error: {result['error']}")
+        result = self.run_diagnostic_command("netstat -ib")
+        logging.debug(f"netstat -ib success: {result['success']}, output length: {len(result['output'])}, error: {result['error']}")
         if not result['success']:
             return None, None
         
         lines = result['output'].split('\n')
-        logging.debug(f"netstat -i lines count: {len(lines)}")
+        logging.debug(f"netstat -ib lines count: {len(lines)}")
         for line in lines:
-            logging.debug(f"netstat -i line: {repr(line)}")
+            logging.debug(f"netstat -ib line: {repr(line)}")
             parts = line.split()
-            if parts and parts[0] == self.interface and not parts[2].startswith('<Link'):
+            if len(parts) >= 7 and parts[0] == self.interface and not parts[2].startswith('<Link'):
                 logging.debug(f"Found interface line: {parts}")
                 try:
-                    ibytes = int(parts[6])  # Ibytes
-                    obytes = int(parts[9])  # Obytes
+                    ibytes = int(parts[4])  # Ibytes
+                    obytes = int(parts[6])  # Obytes
                     logging.debug(f"Parsed ibytes: {ibytes}, obytes: {obytes}")
                     return ibytes, obytes
                 except (IndexError, ValueError) as e:
                     logging.debug(f"Parse error: {e}")
                     pass
-        logging.debug(f"Interface {self.interface} not found in netstat -i")
+        logging.debug(f"Interface {self.interface} not found in netstat -ib")
         return None, None
 
     def format_count(self, n):
@@ -409,44 +409,29 @@ class PortRefresher:
             stdscr: Curses screen object
             timeout: Optional timeout in seconds, None for indefinite
         """
-    def curses_status_screen(self, stdscr, timeout=None):
+    def curses_status_screen(self, stdscr, timeout=None, log_capture=None):
         """
         Display real-time status screen using curses.
         
         Args:
             stdscr: Curses screen object
             timeout: Optional timeout in seconds, None for indefinite
+            log_capture: StringIO object for capturing logs (optional)
         """
         # Set up logging and stdout capture for activity log
         import io
         import sys
         
-        # Create a custom stream that writes to both logging and the original stream
-        class LoggingStream(io.StringIO):
-            def __init__(self, original_stream, logger):
-                super().__init__()
-                self.original_stream = original_stream
-                self.logger = logger
-                
-            def write(self, text):
-                if text.strip():  # Only log non-empty text
-                    self.logger.info(text.rstrip())
-                self.original_stream.write(text)
-                
-            def flush(self):
-                self.original_stream.flush()
-        
-        # Replace stdout with logging stream
-        old_stdout = sys.stdout
-        logging_stream = LoggingStream(old_stdout, logging.getLogger())
-        sys.stdout = logging_stream
-        
-        # Set up logging capture for activity log
-        log_capture = io.StringIO()
-        log_handler = logging.StreamHandler(log_capture)
-        log_handler.setLevel(logging.getLogger().level)
-        log_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
-        logging.getLogger().addHandler(log_handler)
+        # If no log_capture provided, create one
+        if log_capture is None:
+            log_capture = io.StringIO()
+            log_handler = logging.StreamHandler(log_capture)
+            log_handler.setLevel(logging.DEBUG)
+            log_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
+            logging.getLogger().addHandler(log_handler)
+            cleanup_handler = True
+        else:
+            cleanup_handler = False
         
         try:
             # Initialize curses
@@ -608,9 +593,19 @@ class PortRefresher:
                     
                     # Title - safe writing
                     try:
-                        title_win.addstr(0, 0, "ProtonVPN Public Port Refresh - Real-time Status", curses.A_BOLD | curses.color_pair(4))
-                        title_win.addstr(1, 0, f"Gateway: {self.vpn_gateway} | Refresh: {self.refresh_seconds}s | Press 'q' to quit, 'r' to refresh")
-                        title_win.addstr(2, 0, "=" * (width - 1))
+                        title_height, title_width = title_win.getmaxyx()
+                        
+                        title_line = "ProtonVPN Public Port Refresh - Real-time Status"
+                        if len(title_line) > title_width:
+                            title_line = title_line[:title_width - 3] + "..."
+                        title_win.addstr(0, 0, title_line, curses.A_BOLD | curses.color_pair(4))
+                        
+                        subtitle_line = f"Gateway: {self.vpn_gateway} | Refresh: {self.refresh_seconds}s | Press 'q' to quit, 'r' to refresh"
+                        if len(subtitle_line) > title_width:
+                            subtitle_line = subtitle_line[:title_width - 3] + "..."
+                        title_win.addstr(1, 0, subtitle_line)
+                        
+                        title_win.addstr(2, 0, "=" * (title_width - 1))
                     except curses.error:
                         pass
                     
@@ -619,10 +614,16 @@ class PortRefresher:
                         vpn_win.box()
                         vpn_win.addstr(0, 2, " VPN Status ", curses.A_BOLD)
                         
+                        vpn_height, vpn_width = vpn_win.getmaxyx()
+                        max_vpn_text_width = vpn_width - 3  # Leave margin for borders
+                        
                         status = self.check_vpn_connection()
                         if status['connected']:
                             vpn_win.addstr(1, 1, f"Status: Connected", curses.color_pair(1))
-                            vpn_win.addstr(2, 1, f"Interface: {status['interface'] or 'Unknown'}")
+                            interface_line = f"Interface: {status['interface'] or 'Unknown'}"
+                            if len(interface_line) > max_vpn_text_width:
+                                interface_line = interface_line[:max_vpn_text_width - 3] + "..."
+                            vpn_win.addstr(2, 1, interface_line)
                         else:
                             vpn_win.addstr(1, 1, f"Status: Disconnected", curses.color_pair(2))
                             vpn_win.addstr(2, 1, f"Interface: N/A")
@@ -633,11 +634,17 @@ class PortRefresher:
                             vpn_win.addstr(3, 1, f"NAT-PMP: Not supported", curses.color_pair(2))
                         
                         # Show gateway info
-                        vpn_win.addstr(4, 1, f"Gateway: {self.vpn_gateway}")
+                        gateway_line = f"Gateway: {self.vpn_gateway}"
+                        if len(gateway_line) > max_vpn_text_width:
+                            gateway_line = gateway_line[:max_vpn_text_width - 3] + "..."
+                        vpn_win.addstr(4, 1, gateway_line)
                         
                         # Show current port if available
                         if hasattr(self, 'current_port') and self.current_port:
-                            vpn_win.addstr(5, 1, f"Current Port: {self.current_port}")
+                            port_line = f"Current Port: {self.current_port}"
+                            if len(port_line) > max_vpn_text_width:
+                                port_line = port_line[:max_vpn_text_width - 3] + "..."
+                            vpn_win.addstr(5, 1, port_line)
                     except curses.error:
                         pass
                     
@@ -658,8 +665,16 @@ class PortRefresher:
                         logs_win.box()
                         logs_win.addstr(0, 2, " Activity Log ", curses.A_BOLD)
                         
+                        # Get window dimensions for safe text truncation
+                        log_height, log_width = logs_win.getmaxyx()
+                        max_msg_width = log_width - 3  # Leave margin for borders and safety
+                        
                         for i, msg in enumerate(reversed(log_messages)):
-                            if i < logs_win.getmaxyx()[0] - 2:
+                            if i < log_height - 2:
+                                # Truncate message if too long
+                                if len(msg) > max_msg_width:
+                                    msg = msg[:max_msg_width - 3] + "..."
+                                
                                 # Color code based on log level
                                 if 'ERROR' in msg or 'CRITICAL' in msg:
                                     color = curses.color_pair(2)
@@ -695,14 +710,28 @@ class PortRefresher:
                             status_line += f" | Timeout: {timeout_str}"
                         
                         status_line += " | "
+                        
+                        # Truncate status line if too long
+                        status_height, status_width = status_win.getmaxyx()
+                        if len(status_line) > status_width:
+                            status_line = status_line[:status_width - 3] + "..."
+                        
                         status_win.addstr(1, 0, status_line, curses.color_pair(3))
                         
                         # Show current packet counts if available
                         ipkts, opkts = self.get_packet_counts()
                         if ipkts is not None and opkts is not None:
-                            status_win.addstr(f"Bytes In: {self.format_count(ipkts)} | Out: {self.format_count(opkts)}", curses.color_pair(4))
+                            bytes_line = f"Bytes In: {self.format_count(ipkts)} | Out: {self.format_count(opkts)}"
+                            # Truncate bytes line if too long
+                            if len(bytes_line) > status_width:
+                                bytes_line = bytes_line[:status_width - 3] + "..."
+                            status_win.addstr(bytes_line, curses.color_pair(4))
                         
-                        status_win.addstr(2, 0, "Press 'q' to quit | 'r' to refresh | Ctrl+C to stop")
+                        # Bottom instruction line
+                        instruction_line = "Press 'q' to quit | 'r' to refresh | Ctrl+C to stop"
+                        if len(instruction_line) > status_width:
+                            instruction_line = instruction_line[:status_width - 3] + "..."
+                        status_win.addstr(2, 0, instruction_line)
                     except curses.error:
                         pass
                     
@@ -740,10 +769,10 @@ class PortRefresher:
             except:
                 print(f"Error initializing curses: {e}")
         finally:
-            # Clean up logging handler and restore stdout
+            # Clean up logging handler
             try:
-                logging.getLogger().removeHandler(log_handler)
-                sys.stdout = old_stdout
+                if cleanup_handler:
+                    logging.getLogger().removeHandler(log_handler)
             except:
                 pass
             # Clean up curses
@@ -761,19 +790,41 @@ class PortRefresher:
             timeout: Optional timeout in seconds, None for indefinite
             args: Command line arguments
         """
-        import threading
+        import io
         
-        # Start the port refreshing operation in a separate thread
-        operation_thread = threading.Thread(target=self.run_operation_loop, args=(args,))
-        operation_thread.daemon = True
-        operation_thread.start()
+        # Check VPN connection and set interface for packet counting
+        status = self.check_vpn_connection()
+        if status['connected']:
+            self.interface = status['interface']
+            logging.info(f"VPN interface detected: {self.interface}")
+        else:
+            logging.warning("VPN not connected. Packet counts will not be available until connected.")
+            self.interface = None
         
-        # Run the curses status screen
-        self.curses_status_screen(stdscr, timeout)
+        # Set up logging capture before starting operation
+        log_capture = io.StringIO()
+        log_handler = logging.StreamHandler(log_capture)
+        log_handler.setLevel(logging.DEBUG)  # Capture all log levels
+        log_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
+        logging.getLogger().addHandler(log_handler)
         
-        # Stop the operation when curses exits
-        self.stopped = True
-        operation_thread.join(timeout=1.0)
+        try:
+            import threading
+            
+            # Start the port refreshing operation in a separate thread
+            operation_thread = threading.Thread(target=self.run_operation_loop, args=(args,))
+            operation_thread.daemon = True
+            operation_thread.start()
+            
+            # Run the curses status screen
+            self.curses_status_screen(stdscr, timeout, log_capture)
+            
+            # Stop the operation when curses exits
+            self.stopped = True
+            operation_thread.join(timeout=1.0)
+        finally:
+            # Clean up logging handler
+            logging.getLogger().removeHandler(log_handler)
     
     def run_operation_loop(self, args):
         """
