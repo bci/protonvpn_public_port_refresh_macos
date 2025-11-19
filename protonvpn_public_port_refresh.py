@@ -209,7 +209,34 @@ class PortRefresher:
         """
         self.refresh_seconds = refresh_seconds
         self.vpn_gateway = vpn_gateway
-        self.app_control = app_control.split(',') if app_control else []
+        # Parse and validate app_control entries (case-insensitive, allow simple aliases)
+        raw_app_list = [s.strip() for s in app_control.split(',')] if app_control else []
+        # Map lowercase canonical keys to original APPS_CONFIG keys
+        app_key_map = {k.lower(): k for k in APPS_CONFIG.keys()}
+        resolved_apps = []
+        unknown_apps = []
+        for entry in raw_app_list:
+            if not entry:
+                continue
+            key = entry.lower()
+            if key in app_key_map:
+                resolved_apps.append(app_key_map[key])
+                continue
+            # Fallback: try substring match against configured app keys
+            matches = [k for k in APPS_CONFIG.keys() if key in k.lower()]
+            if len(matches) == 1:
+                resolved_apps.append(matches[0])
+            elif len(matches) > 1:
+                # Ambiguous match: warn and pick the first match
+                logging.warning(f"Ambiguous app selection '{entry}'; matched {matches}, using {matches[0]}")
+                resolved_apps.append(matches[0])
+            else:
+                unknown_apps.append(entry)
+
+        for u in unknown_apps:
+            logging.warning(f"Unknown app specified in --app-control: {u}")
+
+        self.app_control = resolved_apps
         self.stopped = False
         self.current_port = None
         self.port_changed_count = 0
@@ -236,6 +263,7 @@ class PortRefresher:
         if loglevel.lower() not in loglevel_map:
             raise ValueError(f'Invalid log level: {loglevel}. Must be one of: {", ".join(loglevel_map.keys())}')
         numeric_level = loglevel_map[loglevel.lower()]
+        self.log_level_numeric = numeric_level
         logging.basicConfig(level=numeric_level, format='%(asctime)s - %(levelname)s - %(message)s')
 
         # Signal handler for graceful stop
@@ -623,7 +651,11 @@ class PortRefresher:
         if log_capture is None:
             log_capture = io.StringIO()
             log_handler = logging.StreamHandler(log_capture)
-            log_handler.setLevel(logging.DEBUG)
+            try:
+                handler_level = self.log_level_numeric
+            except AttributeError:
+                handler_level = logging.DEBUG
+            log_handler.setLevel(handler_level)
             log_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
             logging.getLogger().addHandler(log_handler)
             cleanup_handler = True
@@ -1135,7 +1167,11 @@ class PortRefresher:
         # Set up logging capture FIRST before any operations
         log_capture = io.StringIO()
         log_handler = logging.StreamHandler(log_capture)
-        log_handler.setLevel(logging.DEBUG)  # Capture all log levels
+        try:
+            handler_level = self.log_level_numeric
+        except AttributeError:
+            handler_level = logging.DEBUG
+        log_handler.setLevel(handler_level)
         log_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
         
         # Replace all handlers on the root logger with our StringIO handler
@@ -1143,7 +1179,10 @@ class PortRefresher:
         for handler in root_logger.handlers[:]:
             root_logger.removeHandler(handler)
         root_logger.addHandler(log_handler)
-        root_logger.setLevel(logging.DEBUG)  # Ensure all levels are logged
+        try:
+            root_logger.setLevel(self.log_level_numeric)
+        except AttributeError:
+            root_logger.setLevel(logging.DEBUG)
         
         try:
             import threading
