@@ -86,6 +86,7 @@ python3 protonvpn_public_port_refresh.py
 - `--status-timeout TIMEOUT`: Timeout for status screen in seconds (default: no timeout)
 - `--vpn-gateway GATEWAY`: VPN gateway IP (default: 10.2.0.1)
 - `--vpn-status`: Check and display VPN connection status
+- `--theme THEME`: UI theme name. Choices: `Ocean`, `High-Contrast`, `Slate` (default: `Ocean` when using status screen)
 
 ### Examples
 

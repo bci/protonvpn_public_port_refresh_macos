@@ -190,13 +190,66 @@ APPS_CONFIG = {
     # Add more apps here if needed
 }
 
+# Theme definitions and names (used by curses UI)
+THEME_NAMES = ["Ocean", "High-Contrast", "Slate", "Sunset", "Forest", "Solarized"]
+THEME_DEFS = [
+    # Ocean: clear readable colors with blue title bar
+    {
+        1: (curses.COLOR_GREEN, curses.COLOR_BLACK),   # OK/status (green on black)
+        2: (curses.COLOR_RED, curses.COLOR_BLACK),     # Error (red on black)
+        3: (curses.COLOR_YELLOW, curses.COLOR_BLACK),  # Labels / warnings (yellow on black)
+        4: (curses.COLOR_BLUE, curses.COLOR_BLACK),    # Title / highlights (blue on black)
+        5: (curses.COLOR_WHITE, curses.COLOR_BLACK),   # Normal text (white on black)
+    },
+    # High-Contrast: bright blocks for visibility
+    {
+        1: (curses.COLOR_GREEN, curses.COLOR_BLACK),  # OK (green on black)
+        2: (curses.COLOR_RED, curses.COLOR_BLACK),    # Error (red on black)
+        3: (curses.COLOR_YELLOW, curses.COLOR_BLACK), # Labels (yellow on black)
+        4: (curses.COLOR_WHITE, curses.COLOR_BLACK),  # Title (white on black)
+        5: (curses.COLOR_WHITE, curses.COLOR_BLACK),  # Normal
+    },
+    # Slate: muted/alternate palette
+    {
+        1: (curses.COLOR_CYAN, curses.COLOR_BLACK),   # OK (cyan on black)
+        2: (curses.COLOR_MAGENTA, curses.COLOR_BLACK),# Error (magenta on black)
+        3: (curses.COLOR_YELLOW, curses.COLOR_BLACK), # Labels (yellow on black)
+        4: (curses.COLOR_BLUE, curses.COLOR_BLACK),   # Title (blue on black)
+        5: (curses.COLOR_WHITE, curses.COLOR_BLACK),  # Normal
+    },
+    # Sunset: warm complementary palette (yellow OK, magenta errors)
+    {
+        1: (curses.COLOR_YELLOW, curses.COLOR_BLACK), # OK/status (yellow on black)
+        2: (curses.COLOR_MAGENTA, curses.COLOR_BLACK),# Error (magenta on black)
+        3: (curses.COLOR_RED, curses.COLOR_BLACK),    # Labels / warnings (red on black)
+        4: (curses.COLOR_MAGENTA, curses.COLOR_BLACK),# Title (magenta on black)
+        5: (curses.COLOR_WHITE, curses.COLOR_BLACK),  # Normal
+    },
+    # Forest: green-forward with red accents (complementary)
+    {
+        1: (curses.COLOR_GREEN, curses.COLOR_BLACK),  # OK (green on black)
+        2: (curses.COLOR_RED, curses.COLOR_BLACK),    # Error (red on black)
+        3: (curses.COLOR_YELLOW, curses.COLOR_BLACK), # Labels (yellow on black)
+        4: (curses.COLOR_GREEN, curses.COLOR_BLACK),  # Title (green on black)
+        5: (curses.COLOR_WHITE, curses.COLOR_BLACK),  # Normal
+    },
+    # Solarized-like: cyan/yellow contrast
+    {
+        1: (curses.COLOR_CYAN, curses.COLOR_BLACK),   # OK (cyan on black)
+        2: (curses.COLOR_RED, curses.COLOR_BLACK),    # Error (red on black)
+        3: (curses.COLOR_YELLOW, curses.COLOR_BLACK), # Labels (yellow on black)
+        4: (curses.COLOR_CYAN, curses.COLOR_BLACK),   # Title (cyan on black)
+        5: (curses.COLOR_WHITE, curses.COLOR_BLACK),  # Normal
+    },
+]
+
 class PortRefresher:
     """
     Main class for managing ProtonVPN port refreshing and application control.
     
     Handles the refresh loop, port monitoring, and application lifecycle management.
     """
-    def __init__(self, refresh_seconds, vpn_gateway, app_control, loglevel, pmt_timeout=30):
+    def __init__(self, refresh_seconds, vpn_gateway, app_control, loglevel, pmt_timeout=30, theme=None):
         """
         Initialize the PortRefresher.
         
@@ -248,9 +301,13 @@ class PortRefresher:
         self.prev_ibytes = None
         self.prev_obytes = None
         self.prev_bytes_time = None
+        # Cached packet counts updated by background operation thread
+        self._cached_packet_counts = (None, None)
 
         # Gateway required app state tracking
         self.gateway_required_last_state = {}  # Track last known state for each app
+        # Cached app status to avoid blocking UI when probing app state
+        self._cached_app_status = {}
 
         # Setup logging
         loglevel_map = {
@@ -265,6 +322,12 @@ class PortRefresher:
         numeric_level = loglevel_map[loglevel.lower()]
         self.log_level_numeric = numeric_level
         logging.basicConfig(level=numeric_level, format='%(asctime)s - %(levelname)s - %(message)s')
+
+        # Theme selection (index into THEME_DEFS)
+        if theme and theme in globals().get('THEME_NAMES', []):
+            self.theme_idx = globals()['THEME_NAMES'].index(theme)
+        else:
+            self.theme_idx = 0
 
         # Signal handler for graceful stop
         signal.signal(signal.SIGINT, self.signal_handler)
@@ -666,15 +729,25 @@ class PortRefresher:
             # Initialize curses
             curses.curs_set(0)  # Hide cursor
             stdscr.nodelay(True)  # Non-blocking input
-            stdscr.timeout(status_refresh * 1000)  # Refresh every status_refresh seconds
+            # Use a short getch timeout so keypresses are responsive.
+            # Long status_refresh delays caused theme/key handling to wait.
+            stdscr.timeout(100)  # 100ms getch timeout for responsiveness
             
-            # Color pairs
+            # Initialize color support and apply selected theme
             curses.start_color()
-            curses.init_pair(1, curses.COLOR_GREEN, curses.COLOR_BLACK)  # Success
-            curses.init_pair(2, curses.COLOR_RED, curses.COLOR_BLACK)    # Error
-            curses.init_pair(3, curses.COLOR_YELLOW, curses.COLOR_BLACK) # Warning
-            curses.init_pair(4, curses.COLOR_CYAN, curses.COLOR_BLACK)   # Info
-            curses.init_pair(5, curses.COLOR_WHITE, curses.COLOR_BLACK)  # Normal
+
+            def apply_theme(idx):
+                theme_idx_local = idx % len(globals().get('THEME_DEFS', []))
+                theme = globals().get('THEME_DEFS', [])[theme_idx_local]
+                for pair_id, (fg, bg) in theme.items():
+                    try:
+                        curses.init_pair(pair_id, fg, bg)
+                    except curses.error:
+                        pass
+
+            # Start with refresher-provided theme index if available
+            theme_idx = getattr(self, 'theme_idx', 0)
+            apply_theme(theme_idx)
             
             height, width = stdscr.getmaxyx()
             
@@ -705,6 +778,7 @@ class PortRefresher:
             # Initialize data
             port_history = []
             log_messages = []
+            log_scroll = 0
             last_refresh = time.time() - self.refresh_seconds  # Force initial data update
             start_time = time.time()
             last_port = None
@@ -744,6 +818,26 @@ class PortRefresher:
                         status_win.clear()
                         stdscr.refresh()
                         continue
+                    elif key == ord('t'):
+                        # Cycle theme — handle errors gracefully and log them
+                        try:
+                            theme_idx = (theme_idx + 1) % max(1, len(globals().get('THEME_DEFS', [])))
+                            apply_theme(theme_idx)
+                        except Exception as e:
+                            logging.error(f"Theme change failed: {e}")
+                        continue
+                    elif key in (curses.KEY_UP, ord('k')):
+                        # Scroll logs up
+                        log_scroll = max(0, log_scroll + 1)
+                    elif key in (curses.KEY_DOWN, ord('j')):
+                        # Scroll logs down
+                        log_scroll = max(0, log_scroll - 1)
+                    elif key == curses.KEY_NPAGE:
+                        # Page down
+                        log_scroll = max(0, log_scroll - max(1, logs_height // 2))
+                    elif key == curses.KEY_PPAGE:
+                        # Page up
+                        log_scroll = max(0, log_scroll + max(1, logs_height // 2))
                     
                     # Check if terminal was resized
                     new_height, new_width = stdscr.getmaxyx()
@@ -833,19 +927,19 @@ class PortRefresher:
                     
                     # Update data every refresh interval
                     if current_time - last_refresh >= self.refresh_seconds:
-                        # Get current port
-                        current_port = self.get_public_port(timeout=self.pmt_timeout)
-                        
+                        # Use cached current_port (background thread does actual NAT-PMP calls)
+                        current_port = getattr(self, 'current_port', None)
+
                         # Only add to history if port changed
                         if current_port is not None and current_port != last_port:
                             port_history.append((current_port, datetime.now()))
                             # Keep only last 5 ports
                             port_history = port_history[-5:]
                             last_port = current_port
-                        
-                        # Get packet counts
-                        ipkts, opkts = self.get_packet_counts()
-                        
+
+                        # Use cached packet counts updated by background thread
+                        ipkts, opkts = getattr(self, '_cached_packet_counts', (None, None))
+
                         last_refresh = current_time
                     
                     # Update log messages from captured logs
@@ -868,7 +962,7 @@ class PortRefresher:
                                 else:
                                     # Plain print output or other format
                                     log_messages.append(f"[{datetime.now().strftime('%H:%M:%S')}] {line}")
-                        log_messages = log_messages[-20:]  # Keep last 20 messages
+                        log_messages = log_messages[-100:]  # Keep last 100 messages
                         log_capture.seek(0)
                         log_capture.truncate(0)
                     
@@ -971,20 +1065,34 @@ class PortRefresher:
                         for app_name in self.app_control:
                             if app_name in APPS_CONFIG and 'status' in APPS_CONFIG[app_name]:
                                 try:
-                                    app_status = APPS_CONFIG[app_name]['status'](self)
-                                    
+                                    # Use cached app status updated by background thread to avoid blocking UI
+                                    app_status = self._cached_app_status.get(app_name)
+
+                                    # If cache is empty, show a checking placeholder
+                                    if app_status is None:
+                                        if line_num <= folx_height_win - 2:
+                                            folx_win.addstr(line_num, 1, f"{app_name}:", curses.A_BOLD)
+                                            line_num += 1
+                                        if line_num <= folx_height_win - 2:
+                                            folx_win.addstr(line_num, 1, f"  Status: Checking...", curses.color_pair(3))
+                                            line_num += 1
+                                        # Add spacing and continue
+                                        if line_num <= folx_height_win - 2:
+                                            line_num += 1
+                                        continue
+
                                     # App name header
                                     if line_num <= folx_height_win - 2:
                                         folx_win.addstr(line_num, 1, f"{app_name}:", curses.A_BOLD)
                                         line_num += 1
-                                    
+
                                     # Status info
                                     if line_num <= folx_height_win - 2:
                                         status_text = "Running" if app_status.get('running', False) else "Not Running"
                                         folx_win.addstr(line_num, 1, f"  Status: {status_text}", 
                                                        curses.color_pair(1 if app_status.get('running', False) else 2))
                                         line_num += 1
-                                    
+
                                     if app_status.get('running', False):
                                         # Port info
                                         if 'port' in app_status and line_num <= folx_height_win - 2:
@@ -992,21 +1100,21 @@ class PortRefresher:
                                             folx_win.addstr(line_num, 1, f"  Port: {app_status['port']}", 
                                                            curses.color_pair(1 if port_match else 2))
                                             line_num += 1
-                                        
+
                                         # Connections
                                         if 'connections' in app_status and line_num <= folx_height_win - 2:
                                             folx_win.addstr(line_num, 1, f"  Connections: {app_status['connections']}")
                                             line_num += 1
-                                        
+
                                         # Performance
                                         if 'cpu' in app_status and 'memory' in app_status and line_num <= folx_height_win - 2:
                                             folx_win.addstr(line_num, 1, f"  CPU: {app_status['cpu']:.1f}% | Mem: {app_status['memory']:.1f}MB")
                                             line_num += 1
-                                    
+
                                     # Add spacing between apps
                                     if line_num <= folx_height_win - 2:
                                         line_num += 1
-                                        
+
                                 except Exception as e:
                                     if line_num <= folx_height_win - 2:
                                         folx_win.addstr(line_num, 1, f"  Error: {str(e)[:20]}", curses.color_pair(2))
@@ -1022,23 +1130,44 @@ class PortRefresher:
                         # Get window dimensions for safe text truncation
                         log_height, log_width = logs_win.getmaxyx()
                         max_msg_width = log_width - 3  # Leave margin for borders and safety
-                        
-                        for i, msg in enumerate(log_messages):
-                            if i < log_height - 2:
-                                # Truncate message if too long
-                                if len(msg) > max_msg_width:
-                                    msg = msg[:max_msg_width - 3] + "..."
-                                
-                                # Color code based on log level
-                                if 'ERROR' in msg or 'CRITICAL' in msg:
-                                    color = curses.color_pair(2)
-                                elif 'WARNING' in msg:
-                                    color = curses.color_pair(3)
-                                elif 'INFO' in msg:
-                                    color = curses.color_pair(4)
-                                else:
-                                    color = curses.color_pair(5)
+                        # Support scrolling: show last N messages offset by log_scroll
+                        visible_lines = log_height - 2
+                        total_lines = len(log_messages)
+                        # log_scroll == 0 means scrolled to bottom (most recent)
+                        max_scroll = max(0, total_lines - visible_lines)
+                        if log_scroll > max_scroll:
+                            log_scroll = max_scroll
+
+                        start_idx = max(0, total_lines - visible_lines - log_scroll)
+                        visible = log_messages[start_idx:start_idx + visible_lines]
+
+                        for i, msg in enumerate(visible):
+                            # Truncate message if too long
+                            if len(msg) > max_msg_width:
+                                msg = msg[:max_msg_width - 3] + "..."
+
+                            # Color code based on log level
+                            if 'ERROR' in msg or 'CRITICAL' in msg:
+                                color = curses.color_pair(2)
+                            elif 'WARNING' in msg:
+                                color = curses.color_pair(3)
+                            elif 'INFO' in msg:
+                                color = curses.color_pair(4)
+                            else:
+                                color = curses.color_pair(5)
+                            try:
                                 logs_win.addstr(i+1, 1, msg, color)
+                            except curses.error:
+                                # ignore single-line rendering errors
+                                pass
+                        # Footer showing scroll position
+                        try:
+                            footer = f"Logs: {total_lines} lines | Scroll: {log_scroll}/{max_scroll} | ↑/↓ scroll | PgUp/PgDn"
+                            if len(footer) > log_width - 2:
+                                footer = footer[:log_width - 3] + "..."
+                            logs_win.addstr(log_height - 1, 1, footer, curses.color_pair(5))
+                        except curses.error:
+                            pass
                     except curses.error:
                         pass
                     
@@ -1072,8 +1201,8 @@ class PortRefresher:
                         
                         status_win.addstr(1, 0, status_line, curses.color_pair(3))
                         
-                        # Show current packet counts if available
-                        ipkts, opkts = self.get_packet_counts()
+                        # Show current packet counts if available (use cache)
+                        ipkts, opkts = getattr(self, '_cached_packet_counts', (None, None))
                         if ipkts is not None and opkts is not None:
                             # Calculate BPS rates
                             ibps, obps = self.calculate_bps_rates(ipkts, opkts)
@@ -1091,7 +1220,7 @@ class PortRefresher:
                             status_win.addstr(bytes_line, curses.color_pair(4))
                         
                         # Bottom instruction line
-                        instruction_line = "Press 'q' to quit | 'r' to refresh | Ctrl+C to stop"
+                        instruction_line = "Press 'q' to quit | 'r' to refresh | 't' theme | Ctrl+C to stop"
                         if len(instruction_line) > status_width:
                             instruction_line = instruction_line[:status_width - 3] + "..."
                         status_win.addstr(2, 0, instruction_line)
@@ -1221,6 +1350,26 @@ class PortRefresher:
             operation_thread = threading.Thread(target=self.run_operation_loop, args=(args,))
             operation_thread.daemon = True
             operation_thread.start()
+
+            # Start background thread to update controlled apps' status to avoid blocking the UI
+            def update_app_status_loop():
+                try:
+                    while not self.stopped:
+                        for app_name in self.app_control:
+                            if app_name in APPS_CONFIG and 'status' in APPS_CONFIG[app_name]:
+                                try:
+                                    status = APPS_CONFIG[app_name]['status'](self)
+                                    self._cached_app_status[app_name] = status
+                                except Exception as e:
+                                    logging.debug(f"App status update failed for {app_name}: {e}")
+                        # Wait a short interval between updates
+                        time.sleep(5)
+                except Exception as e:
+                    logging.debug(f"App status updater exited: {e}")
+
+            app_status_thread = threading.Thread(target=update_app_status_loop)
+            app_status_thread.daemon = True
+            app_status_thread.start()
             
             # Run the curses status screen
             self.curses_status_screen(stdscr, timeout, log_capture, status_refresh)
@@ -1229,6 +1378,10 @@ class PortRefresher:
             self.stopped = True
             operation_thread.join(timeout=1.0)
             status_thread.join(timeout=1.0)
+            try:
+                app_status_thread.join(timeout=1.0)
+            except NameError:
+                pass
         finally:
             # Restore stdout and stderr
             sys.stdout = old_stdout
@@ -1384,6 +1537,11 @@ class PortRefresher:
             self.check_gateway_required_apps()
             
             ipkts, opkts = self.get_packet_counts()
+            # Update cached counts for UI thread
+            try:
+                self._cached_packet_counts = (ipkts, opkts)
+            except Exception:
+                pass
             formatted_in = self.format_count(ipkts)
             formatted_out = self.format_count(opkts)
             
@@ -1416,6 +1574,7 @@ def main():
     parser.add_argument("--status", action="store_true", help="Show real-time status screen with curses interface")
     parser.add_argument("--status-timeout", type=int, default=None, help="Timeout for status screen in seconds (default: no timeout)")
     parser.add_argument("--status-refresh", type=int, default=5, help="Status screen refresh interval in seconds (default: 5)")
+    parser.add_argument("--theme", choices=THEME_NAMES, default=None, help=f"UI theme name. Choices: {', '.join(THEME_NAMES)}")
 
     args = parser.parse_args()
 
@@ -1443,14 +1602,20 @@ def main():
             if isinstance(handler, logging.StreamHandler) and hasattr(handler, 'stream') and handler.stream in (sys.stdout, sys.stderr):
                 root_logger.removeHandler(handler)
         # Create refresher for status screen
-        refresher = PortRefresher(args.refresh_seconds, args.vpn_gateway, args.app_control, args.loglevel, args.pmt_timeout)
+        if args.theme is None:
+            refresher = PortRefresher(args.refresh_seconds, args.vpn_gateway, args.app_control, args.loglevel, args.pmt_timeout)
+        else:
+            refresher = PortRefresher(args.refresh_seconds, args.vpn_gateway, args.app_control, args.loglevel, args.pmt_timeout, theme=args.theme)
         # Run curses status screen with normal operation
         curses.wrapper(refresher.curses_status_screen_with_operation, args.status_timeout, args, args.status_refresh)
         return
     if args.vpn_status:
         logging.debug("VPN status check requested")
         # Create a temporary refresher just for status checking
-        temp_refresher = PortRefresher(args.refresh_seconds, args.vpn_gateway, args.app_control, args.loglevel, args.pmt_timeout)
+        if args.theme is None:
+            temp_refresher = PortRefresher(args.refresh_seconds, args.vpn_gateway, args.app_control, args.loglevel, args.pmt_timeout)
+        else:
+            temp_refresher = PortRefresher(args.refresh_seconds, args.vpn_gateway, args.app_control, args.loglevel, args.pmt_timeout, theme=args.theme)
         status = temp_refresher.check_vpn_connection()
         print("VPN Connection Status:")
         print(f"  Connected: {status['connected']}")
@@ -1461,7 +1626,10 @@ def main():
         
     if args.diagnostics:
         logging.debug("Network diagnostics requested")
-        temp_refresher = PortRefresher(args.refresh_seconds, args.vpn_gateway, args.app_control, args.loglevel, args.pmt_timeout)
+        if args.theme is None:
+            temp_refresher = PortRefresher(args.refresh_seconds, args.vpn_gateway, args.app_control, args.loglevel, args.pmt_timeout)
+        else:
+            temp_refresher = PortRefresher(args.refresh_seconds, args.vpn_gateway, args.app_control, args.loglevel, args.pmt_timeout, theme=args.theme)
         print("Running Network Diagnostics...")
         
         # Test basic connectivity
@@ -1480,7 +1648,10 @@ def main():
         
     if args.network_info:
         logging.debug("Network info requested")
-        temp_refresher = PortRefresher(args.refresh_seconds, args.vpn_gateway, args.app_control, args.loglevel, args.pmt_timeout)
+        if args.theme is None:
+            temp_refresher = PortRefresher(args.refresh_seconds, args.vpn_gateway, args.app_control, args.loglevel, args.pmt_timeout)
+        else:
+            temp_refresher = PortRefresher(args.refresh_seconds, args.vpn_gateway, args.app_control, args.loglevel, args.pmt_timeout, theme=args.theme)
         info = temp_refresher.get_network_info()
         print("Network Information:")
         print(f"DNS Resolution: {'✓' if info.get('dns_working', False) else '✗'}")
@@ -1506,7 +1677,10 @@ def main():
         sys.exit(0)
 
     logging.debug("Starting PortRefresher")
-    refresher = PortRefresher(args.refresh_seconds, args.vpn_gateway, args.app_control, args.loglevel, args.pmt_timeout)
+    if args.theme is None:
+        refresher = PortRefresher(args.refresh_seconds, args.vpn_gateway, args.app_control, args.loglevel, args.pmt_timeout)
+    else:
+        refresher = PortRefresher(args.refresh_seconds, args.vpn_gateway, args.app_control, args.loglevel, args.pmt_timeout, theme=args.theme)
     refresher.run()
 
 if __name__ == "__main__":
